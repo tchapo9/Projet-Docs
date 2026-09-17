@@ -1,0 +1,103 @@
+name: "Frontend admin tests"
+
+on:
+  push:
+    paths-ignore:
+      - 'doc/**'
+  pull_request:
+    paths-ignore:
+      - 'doc/**'
+
+permissions:
+  contents: read
+
+jobs:
+  withplugins:
+    env:
+      PNPM_HOME: ~/.pnpm-store
+    name: with plugins
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Etherpad requires Node >= 24 (see package.json engines.node).
+        node: ${{ fromJSON('[24]') }}
+
+    steps:
+      -
+        name: Checkout repository
+        uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      -
+        name: Install all dependencies and symlink for ep_etherpad-lite
+        run: pnpm i
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('src/package.json') }}
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: cd src && npx playwright install
+      - name: Install Playwright system dependencies
+        run: cd src && npx playwright install-deps
+      -
+        name: Create settings.json
+        run: cp settings.json.template settings.json
+      -
+        name: Write custom settings.json that enables the Admin UI tests
+        run: "sed -i 's/\"enableAdminUITests\": false/\"enableAdminUITests\": true,\\n\"users\":{\"admin\":{\"password\":\"changeme1\",\"is_admin\":true}}/' settings.json"
+      -
+        name: Disable import/export rate limiting
+        run: |
+          sed -e '/^ *"importExportRateLimiting":/,/^ *\}/ s/"max":.*/"max": 100000000/' -i settings.json
+      - name: Build admin frontend
+        working-directory: admin
+        run: |
+            pnpm run build
+      - name: Run the frontend admin tests
+        shell: bash
+        run: |
+          pnpm run prod > /tmp/etherpad-server.log 2>&1 &
+          connected=false
+          can_connect() {
+          curl -sSfo /dev/null http://localhost:9001/ || return 1
+          connected=true
+          }
+          now() { date +%s; }
+          start=$(now)
+          while [ $(($(now) - $start)) -le 15 ] && ! can_connect; do
+          sleep 1
+          done
+          cd src
+          pnpm run test-admin
+      - name: Upload server log on failure
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: server-log-admin-${{ matrix.node }}
+          path: /tmp/etherpad-server.log
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: playwright-report-${{ matrix.node }}
+          path: src/playwright-report/
+          retention-days: 30

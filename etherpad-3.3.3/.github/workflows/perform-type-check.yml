@@ -1,0 +1,48 @@
+name: "Perform type checks"
+
+# any branch is useful for testing before a PR is submitted
+on:
+  push:
+    paths-ignore:
+      - "doc/**"
+  pull_request:
+    paths-ignore:
+      - "doc/**"
+
+permissions:
+  contents: read
+
+env:
+  PNPM_HOME: ~/.pnpm-store
+
+jobs:
+  performTypeCheck:
+    if: |
+      (github.event_name != 'pull_request')
+      || (github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id)
+    name: perform type check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install all dependencies and symlink for ep_etherpad-lite
+        run: pnpm install --frozen-lockfile
+      - name: Perform type check
+        working-directory: ./src
+        run: pnpm run ts-check

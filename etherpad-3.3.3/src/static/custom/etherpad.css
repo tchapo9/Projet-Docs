@@ -1,0 +1,326 @@
+/* =========================================================
+ * Lumen Docs — Etherpad custom theme
+ * Couleurs :
+ *   - accent indigo   #4f46e5
+ *   - fond gris       #f3f4f6
+ *   - toolbar blanche
+ * Charge après le skin colibris, via @import dans
+ * src/static/skins/colibris/pad.css. Les déclarations ci-dessous
+ * surchargent les variables CSS du skin.
+ * ========================================================= */
+
+/* ---------------------------------------------------------
+ * VARIABLES GLOBALES (héritées sur toutes les variantes)
+ * --------------------------------------------------------- */
+:root {
+  /* Accent indigo */
+  --primary-color: #4f46e5;
+
+  /* Fond gris de l'application */
+  --light-color: #f3f4f6;
+
+  /* Fond blanc (éditeur / toolbar) */
+  --super-light-color: #ffffff;
+
+  /* Texte */
+  --super-dark-color: #1f2937;
+  --dark-color: #374151;
+  --text-color: #1f2937;
+  --text-soft-color: #6b7280;
+
+  /* Bordures */
+  --middle-color: #e5e7eb;
+  --border-color: #e5e7eb;
+
+  /* Polices */
+  --main-font-family: Inter, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* ---------------------------------------------------------
+ * TOOLBAR BLANCHE
+ * --------------------------------------------------------- */
+.super-light-toolbar .toolbar,
+.super-light-toolbar .popup-content,
+.super-light-toolbar #pad_title {
+  --bg-color: #ffffff;
+  color: #374151;
+}
+
+#editbar {
+  background-color: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+/* Boutons et icônes : accent indigo au survol / sélection */
+.toolbar ul li a:hover,
+.toolbar ul li a.selected,
+.toolbar ul li select:hover {
+  color: #4f46e5;
+  background-color: #eef2ff;
+}
+
+.toolbar ul li a.pressed,
+.toolbar ul li select:active,
+.toolbar .show-more-icon-btn {
+  color: #4f46e5;
+}
+
+.toolbar .menu_right li a.selected {
+  background-color: #4f46e5;
+  color: #ffffff;
+}
+
+/* ---------------------------------------------------------
+ * FOND GRIS #f3f4f6
+ * --------------------------------------------------------- */
+.light-background #editorcontainerbox,
+.light-background #outerdocbody,
+.light-background #chatbox,
+.light-background #sidediv,
+.light-background {
+  --bg-color: #f3f4f6;
+}
+
+html.light-toolbar,
+html.super-light-toolbar {
+  background-color: #f3f4f6;
+}
+
+/* Cage de l'éditeur : fond blanc, coin arrondi */
+#outerdocbody iframe,
+#outerdocbody > #innerdocbody {
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------------------------------------------------------
+ * DIVERS (liens, sélection, focus)
+ * --------------------------------------------------------- */
+a,
+a:visited {
+  color: #4f46e5;
+}
+
+::selection {
+  background-color: rgba(79, 70, 229, 0.2);
+}
+
+/* Accent indigo sur composants focusés */
+input:focus,
+select:focus,
+textarea:focus,
+button:focus {
+  outline: 2px solid #4f46e5;
+  outline-offset: 1px;
+}
+
+/* ────────────────────────────────────────────────────────────
+ * THÈME CLAIR COHÉRENT (antidote au mode sombre OS / Chrome)
+ * ────────────────────────────────────────────────────────────
+ * Depuis la désactivation de `enableDarkMode` (settings.json →
+ * `false`), Etherpad ne bascule plus vers les variantes sombres
+ * quand l'OS est en mode sombre : il applique toujours
+ * `super-light-toolbar super-light-editor light-background`,
+ * qui est déjà un thème clair complet.
+ *
+ * On garde TOUT DE MÊME une garde-fou : si, pour une raison
+ * quelconque, les classes `dark-*` / `super-dark-*` apparaissent
+ * (toggle manuel, défaut régime), on remappe les VARIABLES CSS de
+ * couleur vers un thème clair CONTRASTÉ au lieu d'écraser chaque
+ * élément avec background:white. Tous les composants du skin
+ * (toolbar, sélecteurs, dropdowns .nice-select, popups, options
+ * Text Color / No Highlight) lisent ces variables, donc tout suit.
+ *
+ * Point critique : `--super-dark-color` sert de COULEUR DE TEXTE
+ * (`--text-color: var(--super-dark-color)` dans pad-variants.css).
+ * Il ne faut pas le mettre à blanc — il reste une vraie couleur
+ * foncée. `--bg-soft-color` (fond des selects/popups) était le
+ * maillon manquant qui rendait les options illisibles.
+ */
+html.light-toolbar, html.super-light-toolbar,
+html.dark-toolbar, html.super-dark-toolbar,
+html.dark-editor, html.super-dark-editor,
+html.dark-background, html.super-dark-background {
+  /* Fonds clairs (battent les `--bg-*` sombres posés par les variantes) */
+  --bg-color: #ffffff !important;
+  --bg-soft-color: #f3f4f6 !important;
+  --super-light-color: #ffffff !important;
+  --light-color: #f8fafc !important;
+  --dark-color: #f1f5f9 !important;
+
+  /* Texte / accents : vrais contrastes sur fond clair */
+  --super-dark-color: #111827 !important;   /* texte principal */
+  --text-color: #111827 !important;
+  --text-soft-color: #374151 !important;    /* gris moyen, lisible */
+
+  /* Bordures / séparateurs : visibles */
+  --border-color: #d1d5db !important;
+  --middle-color: #e5e7eb !important;
+  --toolbar-border: 1px solid #e5e7eb !important;
+  --scrollbar-thumb: #cbd5e1 !important;
+  --scrollbar-track: #f8fafc !important;
+
+  /* Peint la racine en clair (zone autour de la feuille) */
+  background-color: #ffffff !important;
+  color-scheme: light !important;
+}
+
+html.dark-toolbar, html.super-dark-toolbar { background-color: #ffffff !important; }
+html.dark-editor, html.super-dark-editor { background-color: #ffffff !important; }
+html.dark-background, html.super-dark-background { background-color: #ffffff !important; }
+
+/* Le skin colibris se sert de `--super-dark-color` comme fond sur
+   certaines variantes extrêmes ; on re-garantit ici que le fond de
+   la page reste clair indépendamment de cette variable polymorphe. */
+html,
+body,
+#editorcontainerbox {
+  background-color: #ffffff !important;
+  color: var(--text-color);
+  color-scheme: light !important;
+}
+
+/* Feuille : blanche, texte sombre (sans !important sur la couleur,
+   pour ne pas écraser les .textcolor-* de la coloration de texte).
+   Les `.textcolor-*` portent `color:...!important` et gagnent. */
+#outerdocbody,
+#outerdocbody #innerdocbody,
+#outerdocbody iframe,
+.full-width-editor #outerdocbody iframe {
+  background-color: #ffffff !important;
+  color: #111827;
+  color-scheme: light !important;
+}
+
+/* Gouttière des numéros de ligne : blanche, texte clair */
+#sidediv,
+#sidedivinner {
+  background-color: #ffffff !important;
+}
+#sidedivinner div {
+  color: #9ca3af;
+}
+
+/* ────────────────────────────────────────────────────────────
+ * PANNEaux & POPUPS : fond blanc, texte foncé, ombre/bordure.
+ * Les popups lisent déjà les variables remapées ci-dessus ; on
+ * ajoute juste une ombre/bordure pour qu'ils se détachent bien
+ * sur fond clair, sans forcer background:white sur chaque élément.
+ * ──────────────────────────────────────────────────────────── */
+.popup-content,
+#users.popup,
+#users.popup .popup-content,
+#mycolorpicker,
+#mycolorpicker .popup-content {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  border: 1px solid var(--border-color);
+  color-scheme: light !important;
+}
+
+/* Liste des collaborateurs : texte foncé, séparateurs visibles */
+#otheruserstable td,
+#otheruserstable th,
+#otheruserstable .usertdname,
+#otheruserstable .usertdcolor {
+  color: #111827;
+  background-color: #ffffff;
+}
+#otheruserstable tr[data-authorId]:hover .usertdname {
+  text-decoration: underline;
+}
+#otheruserstable tr[data-authorId]:hover td {
+  background-color: #f8fafc;
+}
+#myusernameedit {
+  color: #111827 !important;
+  border-bottom-color: var(--border-color) !important;
+}
+
+/* ────────────────────────────────────────────────────────────
+ * TOOLBAR & DROPDOWNS (.nice-select, Text Color / No Highlight)
+ * Fond clair + texte foncé, pour un contraste correct.
+ * ──────────────────────────────────────────────────────────── */
+.toolbar,
+#editbar {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  color-scheme: light !important;
+}
+.toolbar .buttonicon { color: #111827 !important; }
+.toolbar ul li a { color: #111827 !important; }
+
+/* Sélecteurs (à l'état fermé) : fond gris clair, texte foncé */
+select, .nice-select {
+  background-color: #f3f4f6 !important;
+  color: #111827 !important;
+  border-color: #d1d5db !important;
+}
+
+/* Liste déroulante ouverte : fond blanc, texte foncé, bordure */
+.nice-select .list {
+  background-color: #ffffff !important;
+  border: 1px solid #d1d5db !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+.nice-select .option {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+}
+.nice-select .option:hover,
+.nice-select .option.focus,
+.nice-select .option.selected {
+  background-color: #eef2ff !important;
+  color: #111827 !important;
+}
+.nice-select .current {
+  color: #111827 !important;
+}
+
+/* États actifs des boutons : indigo visible sur fond clair */
+.toolbar ul li a.selected {
+  background-color: #eef2ff !important;
+  color: #111827 !important;
+}
+.toolbar ul li a.pressed,
+.toolbar .show-more-icon-btn {
+  color: #4f46e5 !important;
+}
+
+/* =========================================================
+ * COLORER / HIGHLIGHT texte (comme Google Docs)
+ * Classes posées sur les <span> par linestylefilter pour les
+ * attributs 'textcolor' / 'bg' du toolbar. Valeur = hex sans '#'.
+ * ========================================================= */
+.textcolor-e11d48 { color: #e11d48 !important; }
+.textcolor-f59e0b { color: #f59e0b !important; }
+.textcolor-16a34a { color: #16a34a !important; }
+.textcolor-2563eb { color: #2563eb !important; }
+.textcolor-7c3aed { color: #7c3aed !important; }
+.textcolor-334155 { color: #334155 !important; }
+
+.bg-fecaca { background-color: #fecaca !important; }
+.bg-fde68a { background-color: #fde68a !important; }
+.bg-bbf7d0 { background-color: #bbf7d0 !important; }
+.bg-bfdbfe { background-color: #bfdbfe !important; }
+.bg-e9d5ff { background-color: #e9d5ff !important; }
+
+/* Swatches affichés dans les <select> du toolbar */
+.textcolor-option, .bg-option {
+  display: inline-block;
+  min-width: 60px;
+}
+.textcolor-option.swatch-red { color: #e11d48; }
+.textcolor-option.swatch-amber { color: #f59e0b; }
+.textcolor-option.swatch-green { color: #16a34a; }
+.textcolor-option.swatch-blue { color: #2563eb; }
+.textcolor-option.swatch-purple { color: #7c3aed; }
+.textcolor-option.swatch-black { color: #334155; }
+.bg-option.swatch-red { background-color: #fecaca; }
+.bg-option.swatch-amber { background-color: #fde68a; }
+.bg-option.swatch-green { background-color: #bbf7d0; }
+.bg-option.swatch-blue { background-color: #bfdbfe; }
+.bg-option.swatch-purple { background-color: #e9d5ff; }

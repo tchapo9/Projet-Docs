@@ -1,0 +1,2019 @@
+# 3.3.3
+
+3.3.3 is a security release. It closes a **critical unauthenticated arbitrary-file-read** in the `/static/*` handler (GHSA-mc8w-wjhw-45x5) and bundles the fixes for a batch of privately reported issues that had already landed on `develop`: an OpenID Connect provider hardcoded cookie key and permissive CORS reflection (GHSA-pp5v-mvwg-76mp), session-fixation on authentication (GHSA-73h9-c5xp-gfg4), a same-socket cross-pad write TOCTOU (GHSA-6mcx-x5h6-rpw2), and a pad-id delimiter injection in `copyPad`/`movePad` (GHSA-wg58-mhwv-35pq). Alongside the security work it migrates the server build to TypeScript 7 (`tsgo`), fixes PageDown/PageUp navigation across consecutive long wrapped lines, and makes the docker `plugin_packages` volume mountpoint writable.
+
+### Security
+
+- **Prevent pre-auth path traversal / arbitrary file read in `/static/*` (GHSA-mc8w-wjhw-45x5, #8081).** On POSIX a backslash is an ordinary filename byte, so `sanitizePathname()` deliberately leaves an `..\..\..` segment untouched — but `Minify.ts` then converted backslashes to forward slashes *unconditionally, after* the sanitiser, turning those bytes back into `../` traversal components with no re-check. Because the route is mounted on `expressPreSession` (before the auth middleware), any unauthenticated client could read any file readable by the Etherpad process — e.g. `GET /static/plugins/ep_etherpad-lite/static/..%5C..%5C..%5Cetc/passwd` — escalating via disclosed `settings.json`/`credentials.json`/`/proc/self/environ` to an admin session and, through the plugin installer, RCE. The backslash conversion is now guarded to Windows only (`path.sep === '\\'`), matching the invariant already enforced in `sanitizePathname.ts`. Adds a backend regression test that fails on the pre-fix code. Reported by @gcm-explo1t.
+- **Stop shipping a hardcoded OIDC cookie key and reflecting arbitrary CORS origins (GHSA-pp5v-mvwg-76mp, #8070, #8071, #8072).** The embedded OpenID Connect provider shipped a hardcoded cookie-signing key (allowing forged provider cookies) and `clientBasedCORS` reflected any request `Origin`. The provider now derives its cookie keys from the instance secret, CORS reflection is constrained, the soffice export path strips remote images to match the native path, and public routes that echo `x-proxy-path` set `Vary` to prevent cache poisoning. Reported by meifukun.
+- **Regenerate the session id on authentication (GHSA-73h9-c5xp-gfg4, #8074).** Etherpad did not rotate the session identifier when a user authenticated, so a pre-auth session id fixed by an attacker (most impactfully via `ep_openid_connect` SSO) survived login, enabling session-fixation account/admin takeover. The session id is now regenerated on the authentication boundary.
+- **Apply queued `USER_CHANGES` to the enqueue-time pad (GHSA-6mcx-x5h6-rpw2, #8075).** A same-socket `CLIENT_READY` pad-swap could redirect an already-queued `USER_CHANGES` onto a different (read-only or unauthorized) pad, a cross-pad write. Queued changes are now bound to the pad they were enqueued against.
+- **Reject the ueberdb key delimiter `:` in `copyPad`/`movePad` destination ids (GHSA-wg58-mhwv-35pq, #8073).** A destination id containing `:` could bypass the `force=false` overwrite guard and corrupt another pad's revision records. Such ids are now rejected.
+
+### Notable enhancements
+
+- **Migrate the server build to TypeScript 7 / `tsgo` (#8039).** The server now type-checks and builds under the native-Go TypeScript compiler.
+
+### Notable fixes
+
+- **Editor — PageDown/PageUp now advance across consecutive long wrapped lines (#7555).** Paging no longer stalls when several long soft-wrapped lines follow one another.
+- **Docker — make the `plugin_packages` volume mountpoint writable (#8042).** Mounting a plugin-packages volume no longer fails on a read-only mountpoint.
+
+# 3.3.2
+
+3.3.2 is a bug-fix and dependency-hardening follow-up to 3.3.1. It rounds out the pad-deletion UX rework (suppressing the recovery token for durable identities, keeping the token-less Delete button reachable, and closing a read-only deletion hole), restores the saved-revision markers that went missing from in-pad history mode in 3.3.x, and adds env-var overrides so air-gapped installs can switch off Etherpad's outbound calls without editing the image. It also fixes the `migrateDB` / `importSqlFile` / `migrateDirtyDBtoRealDB` CLI scripts against the promise-based ueberdb2 API, rejects unreachable `.`/`..` pad ids, and clears a batch of dependency security advisories (including CVE-2026-54285). On the CI side it unblocks the installer smoke test (which had been hanging the full 6-hour job ceiling since 3.2.0) and pins ueberdb2 past a startup-exit regression in the packaged boot.
+
+### Security
+
+- **Force `@opentelemetry/core` ≥ 2.8.0 (GHSA-8988-4f7v-96qf / CVE-2026-54285, #7975).** The transitive dep (pulled in via `@elastic/elasticsearch` → `@elastic/transport`) had a `W3CBaggagePropagator.extract()` that did not enforce W3C size limits on inbound baggage headers, allowing unbounded memory allocation. Pinned via a `pnpm-workspace.yaml` override; satisfies the existing `2.x` range with no parent bump.
+- **Resolve open Dependabot security alerts (#7967).** Refreshes stale override floors and adds new ones via `pnpm-workspace` overrides: `form-data` ≥ 4.0.6, `ws` ≥ 8.21.0, `esbuild` ≥ 0.28.1, `basic-ftp` ≥ 5.3.1 (capped `<6.0.0` to avoid a surprise major on the plugin-install path), `tar` ≥ 7.5.16, `js-yaml` ≥ 4.2.0, `qs` ≥ 6.15.2, `ip-address` ≥ 10.1.1, and `@babel/core` ≥ 7.29.6.
+- **Reject read-only deletion via token-less paths (part of #7959 / #7960).** Under `allowPadDeletionByAllUsers` a read-only viewer was granted `canDeletePad=true`, and the server's `flagOk`/`creatorOk` branches never checked `session.readonly` — so a read-only link holder could delete a pad without a token. Read-only sessions are now excluded from both the client var and the server's token-less authorization paths; a valid recovery token stays sufficient regardless of session mode.
+
+### Notable enhancements
+
+- **Pad deletion — suppress the recovery token for durable identities and relabel the action (#7926 / #7930).** Building on the `allowPadDeletionByAllUsers` suppression, a creator's deletion token is now also withheld when they have a *durable* identity — authenticated (`req.session.user` with a username) **and** the deployment pins that identity to a stable `authorID` via a `getAuthorId` hook — since only then does the creator survive a cookie clear or a different device, making the token redundant. This tightens the previous "require authentication ⇒ always suppress" rule: without `getAuthorId` the authorID still comes from the per-browser cookie, so an authenticated user on a second device is *not* the creator and keeps getting a token. A new `canDeleteWithoutToken` client var hides the whole recovery-token disclosure (label, field, submit) when no token is needed, and the recovery form now renders for all sessions (hidden by default) so an authenticated creator without a durable mapping still has UI to enter their token. `API.createPad` returns a `null` `deletionToken` under `allowPadDeletionByAllUsers`, matching the socket/UI path.
+- **Offline/air-gapped installs — env-var overrides for the update check, plugin catalog, and updater (#7917, addresses #7911).** Firewalled deployments could not disable Etherpad's outbound calls without editing `settings.json` inside the image. The relevant keys are now wired through the `${ENV:default}` substitution in `settings.json.docker` and `settings.json.template`: `PRIVACY_UPDATE_CHECK`, `PRIVACY_PLUGIN_CATALOG`, `UPDATES_TIER` (`off` = no calls), `UPDATE_SERVER`, plus the docker-only `UPDATES_SOURCE` / `UPDATES_CHANNEL` / `UPDATES_CHECK_INTERVAL_HOURS` / `UPDATES_GITHUB_REPO` / `UPDATES_REQUIRE_ADMIN_FOR_STATUS`. A new "Updates & privacy" section in `doc/docker.md` documents the set; backend tests parse the shipped configs and fail if the `${ENV}` placeholders are dropped. Config, docs, and tests only — no runtime code change.
+
+### Notable fixes
+
+- **Pad — keep the token-less Delete button reachable without pad-wide settings (#7959 / #7960).** The token-less `#delete-pad` button was nested inside the `enablePadWideSettings`-gated section, so disabling pad-wide settings removed the only no-token deletion path — and combined with #7926 hiding the token disclosure when no token is needed, a user allowed to delete could be left with no deletion UI at all. The button is now always rendered (hidden by default) and driven by a `canDeletePad` client var (creator or `allowPadDeletionByAllUsers`, excluding read-only sessions), so the plain button and the recovery-token disclosure are mutually coherent and neither depends on pad-wide settings.
+- **History mode — restore the saved-revision markers (#7946 / #7948).** When #7659 moved the timeslider into the pad as an embedded iframe, the user-facing control became the outer `#history-slider-input`, but the saved-revision stars were still drawn into the now-hidden iframe `#ui-slider-bar`, so "Save Revision" appeared to do nothing in in-pad history mode (a 3.3.x regression). `pad_mode.ts` now bridges the embedded slider's saved revisions onto the outer slider as percentage-positioned, aria-hidden star markers (with click-to-seek for mouse users), and the server's `SAVE_REVISION` handler broadcasts `NEW_SAVEDREV` to the pad room so a revision saved by a collaborator appears live on an already-open history slider. A single revision saved at rev 0 now renders too. Adds Playwright coverage for both the single-client and two-client live paths.
+- **Import dialog — correct the outdated "no converter" help message (#7988 / #7989).** The notice claimed only plain text and HTML could be imported and linked to the legacy AbiWord wiki, prompting LibreOffice installs for formats that already work natively. Etherpad imports `.txt`, `.html`, `.docx` (via mammoth) and `.etherpad` without LibreOffice; only `.pdf`/`.odt`/`.doc`/`.rtf` still need it. The message now says so and points at the documentation site.
+- **PadManager — reject unreachable `.` and `..` pad ids (#7962).** `isValidPadId` accepted ids consisting only of URL dot-segments, but per the WHATWG URL standard a browser normalises `/p/.` to `/p/` and `/p/..` to `/`, so such a pad could be created in the database yet never opened or exported. These ids are now rejected, and the admin `deletePad` handler falls back to a raw key purge when `getPad()` throws so any legacy `.`/`..` pad can still be removed.
+
+### Internal / contributor-facing
+
+- **CLI — fix the database migration/import scripts against the ueberdb2 promise API (#7982 / #7983).** `migrateDB.ts` opened source and target databases, copied all keys, then resolved without closing either — so under ueberdb2 6.1.x the keep-alive timer kept the process hanging after "Done syncing dbs", and buffered target writes were only guaranteed flushed on `close()`. It now closes both databases (flushing writes, clearing the timer) on success and error paths and exits with an explicit status. `importSqlFile.ts` and `migrateDirtyDBtoRealDB.ts` were ported off the pre-v6 callback API to `await db.init()` / `db.set(k, v)` / `db.close()`, removing two `@ts-ignore`s that hid broken calls and fixing an undefined `length` in a progress log; `tsc --noEmit` on the bin package is now clean.
+- **CI — stop the installer smoke test hanging the 6-hour job ceiling (#7981).** The "Installer test" had hung on every ubuntu/macOS run since 3.2.0: `pnpm run prod` is a nested launcher, so `kill "$PID"; wait "$PID"` only signalled the outer pnpm and blocked forever if the node server didn't exit on SIGTERM. Teardown now runs the launcher in its own process group, kills the whole group (SIGTERM then SIGKILL), drops the blocking `wait`, and adds an 8-minute `timeout-minutes` backstop to both smoke steps.
+- **CI — run the Debian-package smoke test on PRs (#7969).** The packaged-boot smoke test previously ran only on push to `develop` — i.e. after merge — which is why the ueberdb2 startup-exit regression turned `develop` red instead of being blocked at PR time. A `pull_request` trigger (scoped to production-footprint paths) now runs the build+smoke job on PRs; the release/apt-publish jobs stay tag-guarded.
+- **Release — park the non-functional `ep_etherpad` npm publish (#7922).** The `releaseEtherpad` workflow republished `./src` as `ep_etherpad`, a package with zero dependents that nothing in the repo or any deployment path consumes, and it had been failing with E404 (no OIDC trusted publisher configured). The job is now gated behind an explicit `confirm: true` dispatch input so a stray run fails fast with a clear message, with the status documented in the workflow header and `AGENTS.MD`.
+- **Tests — port the orphaned legacy timeslider specs to Playwright (#7949).** The `src/tests/frontend/specs/` mocha suite is run by no CI workflow, so its timeslider coverage was dead — which is how the #7946 history-mode regression reached a release. The still-meaningful cases (revision labels, export links, deep-link entry) were ported to `frontend-new` Playwright specs re-targeted at the real in-pad UI, and the three now-ported legacy specs were deleted.
+
+### Dependencies
+
+- `ueberdb2` pinned to `6.1.13`. 6.1.10 rewrote the cache/buffer layer to lazily arm an `.unref()`'d flush timer only when there are dirty keys, so on a fresh empty dirty DB nothing anchored Node's event loop and the packaged (.deb/systemd) boot could exit cleanly (code 0) before `server.listen()` bound the port — failing the Debian-package health check. The dep was pinned back to the last green release (6.1.9, #7969) and then rolled forward to the now-fixed `6.1.13` (#7979), pinned exactly rather than with a caret.
+- `nodemailer` 8.x → 9.0.1 (#7965 / #7950 / #7976), `mongodb` 7.1.1 → 7.3.0 (#7941), `pg` 8.21.0 → 8.22.0 (#7985), `undici` → 8.5.0 (#7980 etc.), `oidc-provider` 9.8.4 → 9.8.5 (#7973), `pdfkit` 0.19.0 → 0.19.1 (#7945), `semver` 7.8.3 → 7.8.4 (#7943), and `@radix-ui/react-switch` 1.3.0 → 1.3.1 (#7974).
+- Dev/build dependency group updates (#7964, #7970, #7978, #7987, #7944, #7951, #7952, and others), including `@types/node` 25 → 26, `esbuild` 0.28.0 → 0.28.1, `eslint` 10.4.1 → 10.5.0, `@playwright/test` 1.60 → 1.61, `vitest` 4.1.8 → 4.1.9, and `actions/checkout` 6 → 7 (#7977).
+
+# 3.3.1
+
+3.3.1 is a small bug-fix and hardening follow-up to 3.3.0. It closes a stored-XSS vector in the numbered-list `start` attribute, hardens the database layer so a dropped connection to PostgreSQL / Redis / RethinkDB no longer crashes the process (via ueberdb2 6.1.9), and fixes a handful of pad and admin regressions — the iOS dark-mode status bar, the settings language dropdown, the pad-deletion modal under `allowPadDeletionByAllUsers`, and a single unreadable pad blanking the admin Manage-pads list.
+
+### Security
+
+- **Pad editor — escape and integer-coerce the numbered-list `start` attribute (GHSA-f7h5-v9hm-548j, #7937).** A crafted `<ol start>` value flowed unescaped into `domline.ts`, a distinct client-side sink from the export-path fix in 3.3.0's #7905. The value is now integer-coerced and HTML-escaped before it reaches the DOM. A jsdom regression test covers the sink.
+
+### Notable fixes
+
+- **Skin — paint the root canvas so iOS dark mode has no white status bar (#7606 / #7931).** iOS Safari paints the top safe area from the `html` root background, which `theme-color` (an Android address-bar hint) does not affect, so dark-mode pads showed a white status-bar strip on iOS. Colibris now sets the root background and `color-scheme` so the safe area matches the editor.
+- **Settings — show the detected language in the dropdown (#7925 / #7928).** The settings language `<select>` did not reflect the language Etherpad had actually auto-detected; it now shows the active selection.
+- **Pad — don't issue a deletion token (or show its modal) when `allowPadDeletionByAllUsers` is on (#7929).** With pad deletion open to all users the client still minted a deletion token and surfaced the confirm modal; both are now suppressed in that configuration.
+- **Admin — one unreadable pad no longer empties the Manage-pads list (#7935 / #7938).** A single pad that failed to read could throw out of the list-hydration path and blank the entire admin Manage-pads view; the read is now guarded per-pad so the rest of the list still renders.
+
+### Internal / contributor-facing
+
+- **CI — downstream client compatibility gate (#7923 / #7924 / #7927).** A new gate smoke-tests the published `etherpad-pad`, `etherpad-cli`, and `etherpad-desktop` clients against the server build (Phase 1 + Phase 2), with robust per-client error handling in `run-clients.sh` so one client's failure is reported rather than masking the others.
+- **CI — verify Etherpad boots offline (#7936).** Adds a test step that confirms a built Etherpad starts with no network access.
+
+### Dependencies
+
+- `ueberdb2` 6.1.8 → 6.1.9 — PostgreSQL pool errors are now handled and TCP keep-alive is enabled (fixes #7878), and the Redis and RethinkDB drivers attach connection-error handlers so a dropped database connection no longer crashes the Etherpad process.
+- `semver` 7.8.2 → 7.8.3 (#7933), `rate-limiter-flexible` 11.1.1 → 11.2.0 (#7934), plus a dev-dependencies group update (#7932).
+
+# 3.3.0
+
+3.3 is primarily a security-hardening release. A defence-in-depth pass tightens the HTTP API entry points, switches random-id generation to a CSPRNG, escapes exported `data-*` attributes, and flips the shipped Docker deployment defaults so a fresh install no longer boots with implicit credentials or a trusting proxy. Alongside that, the `ep_*` pad-options passthrough that shipped opt-in in 3.0.0 is now on by default, the in-pad timeslider learns to honour the editor's view settings (authorship colours, font family, line numbers), and a long tail of pad-editor layout, RTL, and URL-encoding fixes lands. The release also carries the root-cause fix for the long-standing Windows backend-test "silent ELIFECYCLE" flake.
+
+### Notable enhancements
+
+- **Plugin pad options on by default — `settings.enablePluginPadOptions` now defaults to `true` (#7841).** The flag that gates the `ep_*` passthrough on pad options (shipped opt-in in 3.0.0, #7698) is flipped to default-on, so plugins such as `ep_plugin_helpers`' `padToggle` / `padSelect` ride the existing broadcast/persist rail out of the box. This closes `ep_comments_page#422` — stock 3.x deployments `console.warn`ed on every pad load because the helper detected `enablePluginPadOptions === false`. The `settings.json.template` env-var default is flipped to match, so Docker/supervisor configs without an explicit value get the new behaviour. Existing deployments with an explicit `"enablePluginPadOptions": false` keep that value — no migration needed — and the protocol shape is unchanged for older clients.
+- **Timeslider — honour the editor's view settings (#7899).** The in-pad timeslider now respects `showAuthorshipColors`, `padFontFamily`, and line-numbers, bridged from the pad-settings checkboxes into the embedded timeslider iframe so the two views agree. `nice-select.ts` dispatches a native `change` event after the jQuery trigger so the `addEventListener`-based bridge in `pad_mode.ts` fires (jQuery 3.7.1's `trigger()` does not dispatch native DOM events), and the font-family reset is fixed for jQuery 3 (which ignores a `null` css value). The five ad-hoc listener stores in `pad_mode.ts` are consolidated into one `bindOuter()` path and the three view-setting bridges into a single data-driven `bridgeView()` (refactor only).
+- **Admin settings — explain env-var substitution and surface auth errors (#7819 / #7826).** Three env-var-only UX improvements driven by #7819 (a Docker operator saved an `ep_oauth` block in the Raw view and reported it "disappeared", not realising `settings.json` on disk is a *template*, not the effective config): a banner above the editor explaining the template/substitution model (rendered only when the loaded file contains a `${VAR}` placeholder); a read-only **Effective** tab exposing the redacted runtime settings the backend already emitted as `resolved` (also gated on `${VAR}`); and an `admin_auth_error` event so a misrouted Traefik+SSO session that isn't admin gets a clear toast instead of a silent "save did nothing". A reconnect-loop guard suppresses the SPA's auto-reconnect once an auth error has been received. No behaviour change for installs without `${VAR}` placeholders.
+
+### Security hardening
+
+A defence-in-depth pass across the API, token, export, and deployment surfaces:
+
+- **HTTP API request handling, random IDs, and plugin loading (#7906).** `pad_utils.randomString` now generates random IDs via `crypto.getRandomValues` (CSPRNG) instead of `Math.random`. `OAuth2Provider` compares passwords with `crypto.timingSafeEqual` on the raw UTF-8 bytes (resolving the CodeQL "insufficient computational effort" alert) behind a uniform failure delay, and looks users up via own-property access only. `API.appendChatMessage` throws `padID does not exist` rather than creating the pad, consistent with the other content API methods. The `/api/2` REST router forwards only the `authorization` header (not the full request header set) and falls back to it whenever the field is falsy, matching the `openapi.ts` handler so both routers authenticate identically. `LinkInstaller` validates plugin dependency names before building filesystem paths from them, and the admin file server returns a generic error while logging details server-side.
+- **Escape exported `data-*` attributes; warn on default/placeholder credentials (#7905).** `ExportHtml` now escapes the name and value of attributes emitted by the `exportHtmlAdditionalTagsWithData` hook, consistent with the URL/text escaping already applied to exported HTML. `Settings` logs a warning (error level under `NODE_ENV=production`) when an account uses a default/placeholder password from the shipped config, and the check is extended to cover `sso.clients[].client_secret` so enabling SSO without setting `ADMIN_SECRET` / `USER_SECRET` is flagged the same way.
+- **Docker deployment defaults — require explicit credentials, default `TRUST_PROXY` off (#7907).** The shipped `docker-compose` now requires `ADMIN_PASSWORD` and the database password to be provided explicitly (no implicit fallback) and defaults `TRUST_PROXY` to `false`. Operators relying on the previous implicit defaults must now set these values explicitly.
+
+### Notable fixes
+
+- **History mode — lay the timeslider iframe in the editor's flex slot (#7903).** In-pad history mode positioned `#history-frame-mount` as an `inset:0` absolute overlay over `#editorcontainerbox`, which took the iframe out of flow and hid any in-flow side panel (e.g. `ep_webrtc`'s `#rtcbox` video column) beneath it — so history mode and live mode disagreed. The iframe now occupies the same in-flow flex slot the live editor uses, and a latent specificity bug (the `body.history-mode #editorcontainer { display: none }` hide rule was outranked by the two-id layout rule, so the live editor was only ever painted over) is fixed by giving the hide rule matching specificity. Adds a `padmode.spec.ts` regression test.
+- **Pad editor — restore URL wrapping (#7894 / #7896).** Long URLs in the pad editor overflowed instead of wrapping because the global `a { white-space: nowrap }` rule overrode the wrapping properties on `#innerdocbody`. Explicit `white-space` / `word-wrap` / `overflow-wrap` on `#innerdocbody a` restores wrapping inside the editor while preserving no-wrap for links elsewhere in the UI.
+- **RTL content option no longer flips the whole page (#7900 / #7901).** The per-pad RTL content option (`rtlIsTrue`) wrote the direction to the top-level `document.documentElement`, flipping the entire page — toolbar and chrome included. The content direction is now applied to the inner editor document (`targetDoc.documentElement`); page direction stays owned by the UI language (`l10n.ts`). Adds a frontend test asserting the inner editor flips while the top-level `<html>` dir is unchanged.
+- **Pad-wide view settings apply to the creator's own view (#7900 / #7902).** Because a creator is never "enforced upon themselves", a stale personal view-override cookie (e.g. `rtlIsTrue=false` from an earlier toggle) silently masked the pad-wide value they later set, so the control appeared to do nothing on their own screen. Changing a pad-wide view option now syncs the creator's personal pref to the chosen value; the precedence model is unchanged (the creator can still override afterwards via "My view").
+- **URL view-option params lost to a `padeditor.init` race (#7840 / #7843).** `?showLineNumbers=false` and `?useMonospaceFont=true` were silently clobbered shortly after load — the same race #7464 fixed for `?rtl=false`, but the neighbouring `showLineNumbers` / `noColors` / `useMonospaceFontGlobal` blocks were left at the synchronous-tail site. The fix is generalised to all three (moved into `postAceInit`). Mostly observable in cross-context iframe embeds that start with no `prefs` cookie. Adds `url_view_options.spec.ts`.
+- **Default welcome text attributed to the system author (#7885 / #7887).** Auto-generated default pad content (`settings.defaultPadText` / `padDefaultContent` hook) carried the creating user's `author` attribute and rendered in their authorship colour, even though they never wrote it. The welcome text's `author` *attribute* is now `Pad.SYSTEM_AUTHOR_ID`, while revision 0's `meta.author` stays the real creator so ownership (pad-wide settings gate, deletion token) is preserved. Explicitly provided text (e.g. HTTP API `createPad` with text + author) keeps the real author.
+- **URL-encode pad names in the admin 'Open' button and recent pads (#7865 / #7895).** Pad names are `encodeURIComponent`-d in the admin `PadPage` Open href and the colibris recent-pads href, and `decodeURIComponent`-d when read back from the URL pathname; legacy URL-encoded recent-pads names are normalised before re-encoding to prevent double-encoding (`%2F` → `%252F`). The admin Open `window.open` gains `noopener,noreferrer`.
+- **OIDC — fix broken `OIDCAdapter` flows (#7837).** Repairs the adapter flows and widens the storage type to include `string` for the `userCode` index; adds regression tests.
+- **Accessibility — dialog titles/descriptions and a missing l10n key (#7835 / #7836).** Adds the `index.code` key referenced by `index.html` but never defined (which produced a "Couldn't find translation key" console error on the landing page), and gives every admin `@radix-ui/react-dialog` `Dialog.Content` a `Dialog.Title` and `Dialog.Description` (visually hidden where there's no visible heading), silencing Radix's a11y warnings. A new backend spec fails CI if any `data-l10n-id` in `src/templates/*.html` is missing from `en.json`.
+- **Offline/air-gapped Docker boot — stop pnpm self-provisioning a pinned version (issue #7911).** The official image installs pnpm directly (corepack was dropped for Node 25+). Because the image's pnpm intentionally lags the `packageManager` pin in `package.json` (pnpm 11.1.x enforces a minimum-release-age policy the frozen-lockfile build can't satisfy), pnpm treated every call — including the informational `pnpm --version` probe Etherpad runs at startup — as a request to download the pinned build. Behind a firewall that download failed (`Failed to get pnpm version: … Command exited with code 1`), breaking startup. The Dockerfile now sets `pnpm_config_pm_on_fail=ignore`, and the startup probe plus the updater's pnpm-on-PATH checks run with the same flag, so pnpm uses the installed version instead of reaching for the network (without changing which pnpm runs the build-time install). A backend spec fails CI if that guard is dropped while a version gap exists.
+- **Firefox authorship colours — tag early keystrokes with the right author (#7910).** The inner editor's `thisAuthor` starts empty and is only populated when collab_client's queued `setProperty('userAuthor', userId)` reaches the iframe (applied asynchronously via `pendingInit`). Under Firefox timing the first keystrokes could beat it, so freshly typed text — and early line-attribute changes (lists, headings, alignment) — were tagged `author=''`, which canonicalises to an unattributed insert that the server's pad-corruption guard rejects, dropping the whole change and losing authorship (the intermittent `clear_authorship_color` flake, where undo couldn't restore the author colour). A `getLocalAuthor()` helper now falls back to `clientVars.userId` (the same id, available synchronously) whenever `thisAuthor` is still empty, applied at the text-insert sites and to seed `documentAttributeManager.author`; the intentional clear-authorship path and the server-side guard are unchanged.
+- **Dark mode — fix the white address bar and the light-flash on load (#7909, issue #7606).** Dark-mode users still saw a white mobile address bar above the dark toolbar, and the whole page flashed light before going dark. Both came from rendering the light state server-side and switching to dark only after the JS bundle ran: iOS Safari reads `theme-color` at parse time and doesn't reliably repaint on a later JS mutation, and the page painted light before the bundle applied the dark skin classes. The server now emits a `prefers-color-scheme`-scoped `theme-color` pair so the address bar is correct at first paint, plus a small blocking `<head>` script that applies the dark skin classes before the stylesheet paints. Both are gated on `enableDarkMode` (default on) and the colibris skin; `pad.ts` still runs on init to wire up the `#options-darkmode` toggle (which now updates every `theme-color` meta) and theme the editor iframes. Applies to the pad and timeslider views.
+
+### Internal / contributor-facing
+
+- **Root-caused and fixed the Windows backend-test "silent ELIFECYCLE" flake (#7866).** The ~22% Windows flake — rotating across random spec files, no mocha summary, no JS trace — was diagnosed from a full-memory dump as two distinct causes. (1) A timing-fragile test abandoned by mocha keeps running and later throws an *orphan* unhandled rejection; `server.ts`'s process-global `uncaughtException`/`unhandledRejection` handlers (correct for a real Etherpad process) escalated that into a clean `process.exit`. They are now gated behind `require.main === module`, and the backend-test bootstraps (`common.ts`, `diagnostics.ts`) log orphan rejections instead of rethrowing. (2) A stack-buffer overrun in Node 24.x's bundled libuv Windows TCP-connect path (`uv__tcp_connect`) corrupts memory under the suite's localhost-connection churn; CI pins the Windows backend job to Node **24.16.0** (libuv 1.52.1, the bisected fix), referencing upstream `nodejs/node#63620`. Linux stays on Node 24 LTS.
+- **Removed the now-unneeded ELIFECYCLE diagnostic scaffolding (#7846 / #7838 / #7842 / #7868).** The OS-level sidecar watcher, the diagnostics heartbeat/running-test pointer, and the mid-test snapshot — added to chase the flake above — are removed now that the cause is known.
+- **Docs — document the Docker `settings.json` writable-layer and env-var-vs-file semantics (#7819 / #7827).** Two operator-facing gaps surfaced by #7819: that the on-disk `settings.json` is a template (env substitution happens in memory at load time), and that the default compose puts `settings.json` in the container's writable layer with no host mount, so admin edits are lost on `down`/`pull`/watchtower but survive a plain `restart`. Adds prose + a recreate-vs-restart table to `doc/docker.md` and a commented-out opt-in bind mount to the compose files.
+- **Docs refresh for 3.2.0 (#7888)**, **dropped three redundant top-level files (#7839)**, **dropped a fragile viewport assertion in the enter test (#7845)**, and a backend-test fix-up.
+
+### Dependencies
+
+- Two major bumps: `redis` 5.12.1 → 6.0.0 (#7869) and `ejs` 5.0.2 → 6.0.1 (#7860).
+- `ueberdb2` 6.1.2 → 6.1.8, `mssql` 12.5.3 → 12.5.5, `nodemailer` 8.0.7 → 8.0.10, `mysql2` 3.22.3 → 3.22.5 (#7915), `undici` 8.3.0 → 8.4.1 (#7914), `pdfkit` 0.18.0 → 0.19.0 (#7916), `oidc-provider` 9.8.3 → 9.8.4, `@elastic/elasticsearch` 9.4.1 → 9.4.2, `lru-cache` 11.5.0 → 11.5.1, `rate-limiter-flexible` 11.1.0 → 11.1.1, `semver` 7.8.1 → 7.8.2, `js-cookie` 3.0.7 → 3.0.8, `tsx` 4.22.3 → 4.22.4, `@radix-ui/react-switch` 1.2.6 → 1.3.0 (#7913), `@tanstack/react-query` 5.100.11 → 5.101.0 (+ devtools), plus `i18next`, `react-router-dom`, and several dev-dependency group bumps (#7912).
+
+### Localisation
+
+- Multiple updates from translatewiki.net.
+
+# 3.2.0
+
+3.2 adds first-class reverse-proxy / ingress support — `X-Forwarded-Prefix` and `X-Ingress-Path` are now honoured under `trustProxy`, so Etherpad can live under a subpath (Traefik, Nginx, Kubernetes Ingress) without breaking the PWA manifest, social-meta URLs, or any of the bootstrap asset links. The admin settings page learns to show *resolved* runtime values next to `${VAR:default}` placeholders, the v3.1.0 admin pad-list filter chips now apply server-side (so "show empty pads" no longer returns 0–12 of hundreds), and the v3.1.0 redesigned outdated-version gritter actually fires in production now (the session-based author lookup it shipped with always returned null for pad visitors).
+
+### Notable enhancements
+
+- **HTTP — accept `X-Forwarded-Prefix` and `X-Ingress-Path` under `trustProxy` (#7802 / #7806).** With `trustProxy: true`, Etherpad now honours `X-Forwarded-Prefix` (de-facto Traefik / Spring) and `X-Ingress-Path` (Kubernetes Ingress) in addition to the prefix it already inferred from the request path. The shared `sanitizeProxyPath` helper added in 3.1.0 (defence-in-depth: `[A-Za-z0-9_./-]` only, `//+` collapsed, `..` traversal rejected) is extended to the new headers and applied consistently across `/manifest.json`, `socialMeta` `og:url` / `og:image`, and the `index.html` / `pad.html` / `timeslider.html` / `export_html.html` templates (manifest links, jslicense links, reconnect URLs). A pre-existing `..` segment-count miscalculation in `pad.html` / `timeslider.html` that broke the manifest link when served from a deep subpath is also fixed in passing. New end-to-end suite covers the prefix-applied / prefix-ignored matrix under `trustProxy=true|false` for both header names. `settings.json.template` documents the new headers alongside the existing `trustProxy` notes.
+- **Admin settings — resolved runtime values surface on env-pill chips (#7803 / #7807).** The `/admin/settings` socket payload now carries a new `resolved` field alongside the existing raw-file `results` blob, carrying the actual in-memory settings module run through a new redactor (`AdminSettingsRedact`) that replaces known-sensitive paths (`users.*.password`, `dbSettings.password`, `sso.clients[*].client_secret`, `sessionKey`, …) with `[REDACTED]`. The admin SPA's `EnvPill` renders a `→ active value` chip when the path is resolved, or `→ ••••••` with a redacted tooltip when the server returned the sentinel — so `port: ${PORT:9001}` now shows `→ 9001` (or whatever the live value is) instead of silently falling back to the template default. Old admin SPAs that don't read `resolved` continue to work; the save round-trip is unchanged so `${VAR:default}` literals are still preserved verbatim on disk. The admin test script glob picks up `.test.tsx` alongside `.test.ts` so the new `EnvPill` and `resolveByPath` tests run under `tsx --test`.
+
+### Notable fixes
+
+- **Admin pads — filter chip now applies server-side, before pagination (#7798).** The 3.1.0 admin pad-list filter chips (`active` / `recent` / `empty` / `stale`) ran on the client *after* the 12-row page slice had already arrived. On a deployment with hundreds of pads, clicking "empty pads" on page 1 only matched the 0–12 empties that happened to land in the current page, with the pagination footer reporting nonsense totals (reported on a 3.1.0 deployment). The filter is now part of the `padLoad` socket query — pattern filter on names runs first (cheap), metadata hydration for the matching pad universe is gated on a non-`all` filter or a non-`padName` sort and runs under a 16-way concurrency cap (was unbounded `Promise.all`, which fanned out to thousands of in-flight `padManager.getPad()` reads on busy deployments), then the filter chip, then sort + slice. `total` reflects the filtered universe so the footer makes sense. Older admin clients that don't send `filter` keep working — the server defaults to `all`. The `if/else if` ladder that duplicated the hydrate-and-sort loop per `sortBy` is folded into one pipeline with a single comparator switch.
+- **Pad outdated notice — author now resolved from token cookie, not session (Qodo #7804 / #7805).** The 3.1.0 redesigned outdated-version gritter never fired in production. `resolveRequestAuthor()` looked for an `authorID` on `req.session.user`, which Etherpad does not populate for pad visitors (express-session only carries the admin-login user), so `computeOutdated()` always returned EMPTY. The lookup now mirrors how the socket.io handshake resolves pad-visitor identity — read the HttpOnly `token` (or `<prefix>token`) cookie and call `authorManager.getAuthorId(token, user)` via a dynamic import (same circular-init guard pattern the file already uses for `PadManager`). The admin OpenAPI document gains a `description` note clarifying that `/api/version-status` is a public pad-side endpoint that lives in the admin doc only because it shares the same internal route registration.
+- **Localisation — silence spurious "could not translate element content" warning (#7797).** `<select data-l10n-id="…">` with `<option>` element children — the pattern used by `ep_headings2`, `ep_align`, `ep_font_size`, `ep_font_family`, … — used to drop into the textContent branch of `html10n.translateNode`, hunt for a text-node child to overwrite, find none, and emit `Unexpected error: could not translate element content for key …` on every pad load. The `SELECT` / `INPUT` / `TEXTAREA` aria-label fallback already lived inside the same else-branch *after* the warning, so the accessible name landed correctly but the noisy console line still fired. Form-control elements now short-circuit into the aria-label path *before* the text-node hunt — aria-label is the only sensible localization target for these elements (a `<select>`'s text is its `<option>` labels, not its own name). Closes the console warning reported on Etherpad 3.1.0.
+
+### Internal / contributor-facing
+
+- **CI — swap archived `ep_readonly_guest` for `ep_guest` in the plugin matrix (#7795 / #7808).** `ep_readonly_guest` is archived (read-only on GitHub) and its `authenticate` hook unconditionally swapped `req.session.user` with a read-only guest, *even when the request carried an HTTP Authorization header*. That silently demoted admin login attempts and stalled the `anonymizeAuthorSocket` tests for 14 min/run on every with-plugins CI matrix. The pre-fix theory from 3.1.0 (#7796) blamed `ep_hash_auth.handleMessage`; that was a red herring — `handleMessage` only fires on the `/pad` namespace, never on `/settings`. `ep_guest` is the maintained successor (same authors, same purpose); 1.0.72 on npm already defers to basic auth / admin paths. Swapping the matrix unblocks the `anonymizeAuthorSocket` suite on Linux, Windows, and the upgrade-from-latest-release workflow. The runtime probe added in #7796 stays — it still catches any other authenticate-hook plugin that rejects the test's plain-text credentials (e.g. a future hashed-only plugin).
+- **Tests — admin `saveSettings` round-trip + cross-restart persistence (#7819 / #7820 / #7821).** The admin `saveSettings` socket had zero direct backend coverage and the existing e2e "restart works" test only checked that the page renders after a restart, neither of which catches a deployment that resets `settings.json` on restart, nor the user-visible workflow that triggered #7819 (add a top-level plugin block via Raw, save, watch it disappear). Three new backend specs (`adminSettingsSave.ts`) verify byte-for-byte write, top-level-block augmentation round-tripping through the next `load`, and `/* */` comments surviving the write path. A new e2e spec mirrors the #7819 user workflow — open Raw, prepend an `ep_oauth`-shaped top-level block, save, `restartEtherpad()`, re-login, confirm the block is still in Raw and surfaces as its own Form-view section (`Ep oauth` from `humanize()`). A separate `docker.yml` job (`adminSettings_7819.ts`) authenticates via `POST /admin-auth/` (always-requireAdmin, regardless of `settings.requireAuthentication`), saves a hand-built minimal-but-viable settings document containing a marker block, `docker exec test grep`s for it, `docker restart`s the container, waits for the health probe, and re-greps. Both checks must pass.
+- **Bug report template** now asks contributors whether the abstraction in their proposed fix matches the rest of the codebase, to head off premature-generalisation fixes earlier in review.
+
+### Dependencies
+
+- `ueberdb2` 6.0.3 → 6.1.2 (two patch releases of cleanup on top of the 6.1.0 `findKeysPaged` API that the 3.1.0 sessionstorage OOM fix relies on).
+- `semver` 7.8.0 → 7.8.1, `lru-cache` 11.3.6 → 11.5.0, `@elastic/elasticsearch` 9.4.0 → 9.4.1, `pg` 8.20.0 → 8.21.0, `openapi-backend` 5.16.1 → 5.17.0, `tsx` 4.22.0 → 4.22.3, `@tanstack/react-query` 5.100.10 → 5.100.11 + `@tanstack/react-query-devtools`, `js-cookie` 3.0.6 → 3.0.7, plus two dev-dependency group bumps.
+
+### Localisation
+
+- Multiple updates from translatewiki.net.
+
+# 3.1.0
+
+3.1 ships the self-update programme's **Tier 4 — autonomous in a maintenance window** for real (the v3.0.0 notes documented the design; this is the release the code actually lands in), adds first-class SMTP delivery so update failures email the admin, and bundles a defence-in-depth pass across the HTTP/API entry points. Two new admin-facing escape hatches arrive: a preflight check that aborts an update *before* it mutates the working tree when the target tag's `engines.node` doesn't match the running runtime, and email notifications for every auto-rollback / preflight outcome (not just the terminal `rollback-failed` state).
+
+### Notable enhancements
+
+- **pad: Outdated-version notice redesigned (#7799).** The persistent "severely outdated" banner is replaced by a dismissable gritter notification (auto-fades after 8 seconds), shown only to a pad's first author and only when the server is at least one minor version behind the latest released version. Patch-only deltas no longer fire the notice. The `vulnerable-below` directive scraping, the `severe` and `vulnerable` enum values, and the `vulnerableBelow` state field have been removed.
+- **API: `GET /api/version-status` updated (#7799).** Now accepts an optional `?padId=<id>` query parameter and returns `{outdated: "minor" | null, isFirstAuthor: boolean}`. The `severe` and `vulnerable` enum values are gone. Results are cached per `(padId, authorId)` for 60 seconds.
+
+- **Self-update — Tier 4 (autonomous in a maintenance window).** Set `updates.tier: "autonomous"` together with `updates.maintenanceWindow: {"start":"HH:MM","end":"HH:MM","tz":"local"|"utc"}` to constrain autonomous updates to a nightly window. The scheduler snaps `scheduledFor` forward to the next window opening when grace would otherwise land outside the window, and defers the fire when the window has closed by the timer callback. Cross-midnight windows (`end < start`) are supported; DST transitions are absorbed by host wall-clock arithmetic. A missing or malformed window degrades the policy to Tier 3 with an explicit `policy.reason` of `maintenance-window-missing` / `maintenance-window-invalid`; an admin banner surfaces the misconfiguration so autonomous behaviour is not silently disabled. The admin update page shows a "Maintenance window" section with the parsed window summary, the next opening, and a "deferred until <iso>" subtitle on the scheduled panel when the timer has been snapped forward. Closes #7607 (#7753).
+- **Updater — real SMTP via nodemailer (new top-level `mail.*` block).** Replaces the "(would send email)" stub. New settings: `mail.host`, `mail.port`, `mail.secure`, `mail.from`, `mail.auth.{user,pass}`. `mail.host=null` keeps the legacy log-only behaviour. The `nodemailer` dependency is lazy-imported on first send so installs that don't configure mail pay no runtime cost; the transport is cached on the full SMTP options tuple so a `reloadSettings()` change to host/port/credentials invalidates the cache. `settings.json.docker` reads `MAIL_HOST` / `MAIL_FROM` / `MAIL_PORT` / `MAIL_SECURE` from env. Send errors are logged warn and swallowed so a transient SMTP failure can never poison the updater state machine.
+- **Updater — preflight against the target tag's `engines.node`.** Before mutating the working tree, `runPreflight` now runs `git show <tag>:package.json` and verifies `process.versions.node` satisfies the target's `engines.node`. A mismatch fails cleanly at `preflight-failed` with the detail `target requires Node >=X, running Y` — no drain, no restart, no rollback. The check runs *after* signature verification so we only trust signed `package.json`. New `PreflightReason: 'node-engine-mismatch'`.
+- **Updater — email admin on rollback / preflight-failed (not just `rollback-failed`).** Before this release only the terminal `rollback-failed` state emailed. Auto-recovered failures (`rolled-back-install-failed`, `rolled-back-build-failed`, `rolled-back-health-check`, `rolled-back-crash-loop`) and `preflight-failed` now also fire one email per `<outcome>:<targetTag>` (dedupe key in `EmailSendLog.lastFailureKey`). A 3am autonomous update that rolls back because of, say, a Node engine bump now lands in the admin inbox at 3am instead of staying invisible until the next admin login. Boot-path catch-up covers cases where the failure preceded a clean process exit (timer-fired health-check rollback, crash-loop forced rollback, preflight-failed that didn't get to email before exit).
+- **API — `listAuthorsOfPad` filters the synthetic system author.** `Pad.SYSTEM_AUTHOR_ID` (`a.etherpad-system`) is the placeholder Etherpad attributes to when the HTTP API receives a call without an `authorId` (setText, setHTML, appendText, server-side import). It was leaking through `listAuthorsOfPad`, making pads with only API-driven content appear to have one "real" author. The synthetic id is now filtered at that API surface only — `getAllAuthors()` and downstream callers (copy, anonymize, atext verification) still see it. Fixes #7785 / #7790 (#7793).
+
+### Notable fixes
+
+- **Export HTML — ordered-list counter no longer poisoned by a sibling unordered list.** When an ordered-list level was the only consumer of `olItemCounts`, closing *any* list at that depth (including a `<ul>` that happened to share the level) reset the counter to 0. A subsequent unrelated `<ol>` at the same depth then took the "counter exists but is 0" branch and emitted `<ol class="...">` without the `start=` attribute. The reset is now gated on `line.listTypeName === 'number'` so closing an unordered list never touches the ol bookkeeping. Fixes #7786 / #7787 (#7791).
+- **Export — bad `:rev` returns a meaningful 500 body, not Express's HTML error page.** A non-numeric `:rev` (e.g. `/p/foo/test1/export/txt`) reached `checkValidRev` which throws `CustomError('rev is not a number', 'apierror')`; the message fell through `.catch(next)` and Express's default renderer returned an HTML 500 page. The route handler now catches the apierror and emits `err.message` as a deterministic `text/plain` 500. As a follow-up, `checkValidRev` runs *before* `res.attachment()` so an invalid rev no longer leaves a `Content-Disposition` header in place (browsers were offering to save the error message as a file), and unrelated export failures (conversion, fs, soffice) are surfaced as text/plain rather than the HTML stack page. Fixes #7788 (#7792).
+- **Session cleanup no longer OOMs on huge sessionstorage tables.** Pre-2.7.3 `SessionStore._cleanup()` issued a single unbounded `findKeys('sessionstorage:*', null)` that materialised every key into one JS array; on a decade-old MariaDB install with millions of stale sessions the mysql2 driver retained the rows on the pool connection while the JS array dominated heap, OOMing the process within ~15 minutes of boot. Cleanup now pages the keyspace in 500-key batches via the new `findKeysPaged` API on ueberdb2 6.1.0 (DB-side ranged query on mysql/postgres, JS-side fallback elsewhere), yielding to the event loop between pages. A single run is capped at 10 minutes; the next scheduled run continues. The defensive cursor-stall guard now logs an error rather than silently aborting, and `DB.init()` fails fast if any required wrapper method is missing (a misconfigured ueberdb2 pin surfaces at boot instead of an hour later). Fixes #7830 (#7831).
+
+### Security hardening
+
+A bundle of defence-in-depth tightening picked up during an internal audit pass (#7784):
+
+- **HTTP API — OAuth JWT path.** Verify the signature *before* reading any claim off the payload; require `admin: true` strictly (presence is no longer sufficient). The apikey comparison switches to `crypto.timingSafeEqual`.
+- **Import/Export temp-file path tokens.** Derived from `crypto.randomBytes(16)` instead of `Math.random()`.
+- **Token transfer.** Records now have a 5-minute TTL and are single-use (removed from the store before responding). The author token is no longer in the redemption response body — the `HttpOnly` cookie is the only delivery channel.
+- **`x-proxy-path` header sanitiser (new `src/node/utils/sanitizeProxyPath.ts`).** Shared by `admin.ts` and `specialpages.ts`. Strips characters outside `[A-Za-z0-9_./-]`, collapses leading `//+` to a single `/`, rejects `..` traversal. `admin.ts` also emits `Vary: x-proxy-path` and `Cache-Control: private, no-store` so a poisoned response can never be reused for another origin.
+- **`Pad.appendRevision` insert-op author invariant.** Centralises the "every insert op carries an `author` attribute" rule the socket handler already enforced, so non-wire callers (`setText`, `setHTML`, `restoreRevision`, plugin paths) get the same check. `Pad.init` and `setPadHTML` substitute `SYSTEM_AUTHOR_ID` when no author is supplied — same pattern `setText` / `spliceText` already used.
+- **`setPadRaw` legacy-import rewrite.** Bulk-import bypasses `appendRevision`, so a hand-crafted `.etherpad` file could persist non-conforming records that any subsequent `setText` / `setHTML` would refuse to extend. A pre-pass now walks revs in order, sanitises each changeset's `+` ops against the cumulative pad pool (substituting `SYSTEM_AUTHOR_ID` where needed), and re-applies each changeset to a running atext so the head atext and key-rev `meta.atext` / `meta.pool` snapshots stay in lock-step. Conforming payloads round-trip unchanged.
+
+### Internal / contributor-facing
+
+- **Backend tests — `tests/backend/specs/{api,admin}/*` un-skipped.** The pnpm test script's glob (`tests/backend/specs/**.ts`) only matched depth-1 files. Every spec under `api/` (14 files) and `admin/` (2 files) has been silently skipped by CI. Switched to `--extension ts --recursive` so mocha walks the tree as documented. A new vitest regression check reads the pnpm script, hands mocha the same arguments under `--dry-run --list-files`, and asserts representative specs from both subdirectories appear in the discovered list (#7789).
+- **CI — Windows `npx ENOENT` in the glob-discovery regression check.** `execFileSync('npx', ...)` doesn't pick up `npx.cmd` on Windows runners. Resolved by running `mocha`'s JS entry directly via `require.resolve` under the current node process. Path normalisation now goes through `path.relative` + `replace([\\/])` so mixed-separator / drive-letter casing on Windows mocha output still matches the POSIX-relative assertions (#7794).
+- **CI — `anonymizeAuthorSocket` suite gated on admin-socket health when `ep_hash_auth` is installed.** Un-hiding the suite in #7789 surfaced a 14-minute stall on every with-plugins matrix run because `ep_hash_auth`'s `handleMessage` hook fires for every socket message regardless of namespace and reads from the deprecated `client` context (undefined for non-pad namespaces). Until the root cause lands (tracked in #7795), the suite skips itself when an application-level probe shows the admin `/settings` namespace isn't responding — keeps the no-plugin matrix covered and stops burning ~14 minutes per with-plugins run (#7796).
+
+### Localisation
+
+- Multiple updates from translatewiki.net.
+
+# 3.0.0
+
+3.0 is a feature-heavy release that closes out the self-update programme (Tiers 2 and 3 land alongside Tier 1 from 2.7.3), removes the last identified upstream telemetry vector, and ships a parsed JSONC settings editor, native DOCX export, in-place pad history scrubbing, and an admin UI for GDPR author erasure. It also marks the start of the broader Etherpad app ecosystem (see *Companion apps* below).
+
+### Breaking changes
+
+- **Minimum required Node.js version is now 24.** Node.js 22 is no longer supported. Node 25 was briefly the floor mid-cycle but was rolled back to **24 LTS (Krypton, supported through ~May 2028)** because Node 25 reached end-of-life on 2026-04-10 (see #7779 / #7781). The CI matrix targets Node 24 and 26. Node 24 still ships Corepack, so existing `bin/installer.sh` / `bin/installer.ps1` flows continue to work unchanged; the global `pnpm` install fallback added for the Node 25 detour is kept for forward-compatibility.
+- **`pnpm` floor raised to `pnpm@11.1.2`.** `packageManager` is now pinned to `pnpm@11.1.2` and `engines.pnpm` requires `>=11.1.2`. The Dockerfile, snap, .deb and all GitHub workflows are aligned.
+- **`swagger-ui-express` removed.** `/api-docs` now serves a vendored, telemetry-free copy of [Scalar](https://github.com/scalar/scalar) (see the privacy item below). The route, the OpenAPI document, and the rendered output are unchanged for downstream consumers, but anything that introspected `swagger-ui-express` internals will need updating.
+- **Debian package depends on `nodejs (>= 24)`.** The signed apt repository at `etherpad.org/apt` is rebuilt against this floor; older Node packages are no longer acceptable as a dependency (#7754).
+
+### Companion apps
+
+This release coincides with the launch of two ecosystem projects, both maintained under the [`ether` org](https://github.com/ether) and able to talk to any 3.x Etherpad server over its existing HTTP / WebSocket API:
+
+- **[`ether/etherpad-desktop`](https://github.com/ether/etherpad-desktop)** — a native desktop wrapper around Etherpad for macOS, Windows and Linux. Single-window editor experience, system-tray indicator, and an optional embedded server for fully offline pads.
+- **[`ether/pad`](https://github.com/ether/pad)** — a portable cross-target client: an Android and iOS app for editing pads on the go, and a `nano`-style terminal client for headless / SSH workflows. Shares the same realtime client transport as the browser editor so changes propagate live across desktop, mobile, terminal and the web UI.
+
+Both clients hit the **stable 3.x API surface**, so server operators don't need to enable anything extra to support them — the OpenAPI clean-up landed in this release (see *Notable enhancements*) is what makes the shared client code generators viable.
+
+### Notable enhancements
+
+- **Self-update subsystem — Tier 2 (manual click).**
+  - Admins on a git install can click "Apply update" at `/admin/update`. Etherpad runs a 60s session drain (with T-60 / T-30 / T-10 broadcasts to every pad), `git fetch / checkout / pnpm install --frozen-lockfile / pnpm run build:ui`, and exits with code 75 so a process supervisor restarts it on the new version. The next boot runs a 60s health check; if `/health` doesn't come up the previous SHA + lockfile are restored automatically.
+  - Crash-loop guard: if the new version reboots more than twice without the health check completing, RollbackHandler forces a rollback regardless of the timer.
+  - Terminal `rollback-failed` state surfaces a strong banner; the admin clicks Acknowledge once they've manually recovered to clear the lock and re-allow Tier 2 attempts.
+  - New settings under `updates.*`: `preApplyGraceMinutes`, `drainSeconds`, `rollbackHealthCheckSeconds`, `diskSpaceMinMB`, `requireSignature`, `trustedKeysPath`. Tag signature verification is opt-in (default `false`) — see `doc/admin/updates.md` for the keyring setup.
+  - **A process supervisor (systemd / pm2 / docker `--restart=unless-stopped`) is required to apply updates.** Without one, exit 75 leaves the instance down.
+- **Self-update subsystem — Tier 3 (auto with grace window).**
+  - On a git install, set `updates.tier: "auto"` to have new releases applied automatically after `preApplyGraceMinutes`. During the grace window, `/admin/update` shows a live countdown plus Cancel and Apply now buttons. Schedules are persisted to `var/update-state.json`, so an Etherpad restart during the grace window rehydrates the timer instead of losing the schedule. A new release tag detected mid-grace re-arms the timer; if `adminEmail` is set, a one-shot `grace-start` notification fires per scheduled tag (issue #7607).
+  - The terminal `rollback-failed` state continues to disable auto/autonomous attempts globally until acknowledged; manual click stays available because an admin click *is* the intervention the terminal state requires.
+- **Self-update subsystem — Tier 4 (autonomous in a maintenance window).**
+  - Set `updates.tier: "autonomous"` together with `updates.maintenanceWindow: {"start":"HH:MM","end":"HH:MM","tz":"local"|"utc"}` to constrain autonomous updates to a nightly window. The scheduler snaps `scheduledFor` forward to the next window opening when grace would otherwise land outside the window, and defers the fire when the window has closed by the timer callback. Cross-midnight windows (`end < start`) are supported; DST transitions are absorbed by the host's wall-clock arithmetic.
+  - A missing or malformed window degrades the policy to Tier 3 with an explicit `policy.reason` of `maintenance-window-missing` / `maintenance-window-invalid`; an admin banner surfaces the misconfiguration so autonomous behavior is not silently disabled. Closes #7607.
+- **Privacy — drop swagger-ui telemetry, document phone-homes, add opt-outs.**
+  - Dropped `swagger-ui-express` because upstream injects a Scarf analytics pixel that cannot be disabled at install or runtime (see [swagger-api/swagger-ui#10573](https://github.com/swagger-api/swagger-ui/issues/10573)). `/api-docs` now serves a vendored copy of [Scalar](https://github.com/scalar/scalar) (MIT) configured with `withDefaultFonts: false` and `telemetry: false` so no outbound calls are made.
+  - New `privacy.updateCheck` (default `true`) — set to `false` to disable the hourly `UpdateCheck.ts` request to `${updateServer}/info.json`.
+  - New `privacy.pluginCatalog` (default `true`) — set to `false` to disable the admin plugins page fetch of `${updateServer}/plugins.json`. CLI install-by-name still works.
+  - New [`PRIVACY.md`](PRIVACY.md) at repo root documenting both outbound calls, what they send, and how to turn each off.
+  - `bin/plugins/stalePlugins.ts` now reads `settings.updateServer` (was hardcoded to `static.etherpad.org`) and honours the new flag.
+  - Closes #7524.
+- **Parsed JSONC settings editor in `/admin`.** The settings page now parses `settings.json` as JSONC (with comments and trailing commas preserved), validates edits in-browser, and writes the file back without clobbering comment blocks (#7709, closes #7603, takes over #7666).
+- **GDPR — admin UI for author erasure.** Builds on the 2.7.3 author-erasure API: admins can now find an author by id or name in `/admin` and run a confirmed erasure flow from the UI (#7667, follow-up to #7550).
+- **Pad-wide settings on by default.** `padOptions`-style settings can now be edited from the in-pad cog without flipping a flag, and the modal title no longer misleads about scope (#7679). Plugin-namespaced `ep_*` keys also flow through `applyPadSettings` so plugins can register their own pad-wide options (#7698).
+- **Scrub history in-place on the pad URL.** A long-edited pad can now have its history rewritten in place (e.g. for compliance or to drop accidentally-pasted secrets), without changing the pad URL or breaking deep-links (#7710, closes #7659).
+- **`bin/compactStalePads` — staleness-gated bulk compaction.** Companion to the 2.7.3 `compactAllPads` CLI: targets only pads not edited in the last `--older-than N` days, so hot pads in active timeslider use are left alone. Same `--keep` / `--dry-run` shape as `compactAllPads` (#7708, issue #7642).
+- **Native DOCX export (opt-in).** A `html-to-docx`-based exporter lands as an alternative to the LibreOffice path, so installs that don't want `soffice` on the host can still produce `.docx`. `soffice` is now documented as optional for `.docx` and `.pdf` (#7568 / #7707, issue #7538).
+- **Editor / UI.**
+  - Settings popup is now scrollable on short viewports so the lower controls stay reachable on small laptops (#7703, issue #7696).
+  - Admin design pass cleans up the rework introduced in 2.7.3 (#7716).
+  - `theme-color` meta now follows the client-side dark-mode switch instead of locking to the boot-time value (#7690, issue #7606).
+  - `menu_right` stays visible on readonly pads by default; operators that prefer the slimmer chrome can still opt in via `showMenuRight` (#7783).
+  - Social meta: new `settings.socialMeta.description` override (#7691) plus a fix for numeric / boolean override values that were silently being dropped during coercion (#7692).
+- **Admin / API surface.**
+  - The published OpenAPI spec is cleaned up for downstream codegens — duplicate operationIds removed, response schemas filled in, `nullable` ⟶ `oneOf null` migrated for OpenAPI 3.1 (#7714). The companion apps above consume this directly.
+  - Admin endpoints (`/admin/*` JSON APIs) are now documented in the OpenAPI spec (#7693 / #7705) and called from a typesafe TanStack Query client in the admin SPA (#7638 / #7695).
+  - "Requires newer Etherpad" message in the plugin browser when an `ep.json` declares an `engines.etherpad` higher than the running version, instead of failing with a generic install error (#7763 / #7771).
+- **Security hardening.**
+  - Reject `USER_CHANGES` inserts that arrive without an author attribute, closing a server-side trust gap where unattributed changes could be applied to a pad (#7773).
+  - Integrator-issued `sessionID` cookies can now be marked `HttpOnly` via the new option, matching the 2.7.3 author-token hardening (#7045 / #7755).
+- **Observability — Prometheus counters.** Three new counters surface scaling-relevant events (`pad_load_total`, `socket_connect_total`, `changeset_apply_total`) so operators can drive horizontal-scaling decisions off the existing `/metrics` endpoint without a custom exporter (#7756 / #7762).
+- **Accessibility (continuation of the 2.7.2 / 2.7.3 pass).**
+  - Skip-to-content link plus hiding line-number gutters from screen readers (#7255 / #7758).
+  - Named `role="toolbar"` regions and `linemetricsdiv` hidden from assistive tech (#7255 / #7777).
+  - Localized `aria-label` on form controls (`<select>`, `<input>`, `<textarea>`) and on export-as links (#7697 / #7713).
+  - Removed `role="textbox"` / `aria-multiline` from `innerdocbody` where they no longer matched the editor's real semantics (#7778 / #7782).
+
+### Notable fixes
+
+- **Docker — pnpm at runtime.** Bypass `pnpm` at container start so the entrypoint no longer triggers a spurious `deps-status` reinstall on every restart (#7718 / #7727). The Corepack cache is now shared so the unprivileged `etherpad` user can resolve `pnpm` (#7689).
+- **Debian — `plugin_packages` stays in-tree.** The `.deb` now keeps `plugin_packages/` under the install root so plugins installed at runtime can still resolve `ep_etherpad-lite` (#7750).
+- **Admin — restore search and sort.** `SearchField` and the column-sort helpers used by the authors page were lost during the admin rework; they're restored (#7746).
+- **Admin — German strings hardcoded in error paths.** A handful of leftover German strings from the rework are replaced with i18n keys (#7735 / #7736).
+- **Settings — `username: false` / `malformed color: false` regression.** Legacy `settings.json` files that used `false` to disable a feature no longer surface as `'false'` username or `'malformed color: false'` errors (#7688, issue #7686).
+
+### Internal / contributor-facing
+
+- **Database driver — `ueberdb2` 5 → 6.** Major-version bump to `ueberdb2@^6.0.3` (#7734). Drivers are pinned through the lockfile; the schema-level changes are documented in the `ueberdb2` 6.0 release notes.
+- **CI / tests.**
+  - Windows + Node 24 backend-test flake fixed; native crashes are now captured for diagnosis (#7748).
+  - `updater-integration` rmdir-retry to clear the long-standing Windows `EBUSY` flake (#7728).
+  - `lowerCasePadIds` spec closes its socket.io clients on teardown (#7722).
+  - Admin tests realigned to the typesafe API client + plugin row count fixes (#7712).
+  - Rate-limit test waits for Etherpad readiness before running, instead of racing the boot sequence (#7726).
+- README link fixes and tidy-up (#7723 / #7724 / #7725).
+- Several dependency-group bumps across the dev and runtime trees: `undici` 7.25 → 8.3, `semver` 7.7.4 → 7.8, `tsx` 4.21 → 4.22, `mssql` 12.5.2 → 12.5.3, `js-cookie` 3.0.5 → 3.0.6, `@tanstack/react-query` 5.100.9 → 5.100.10, `actions/dependency-review-action` 4 → 5, plus the usual Dependabot dev-group rollups.
+
+### Localisation
+
+- Multiple updates from translatewiki.net.
+
+# 2.7.3
+
+### Breaking changes
+
+- **Minimum required Node.js version is now 22.13.** Node.js 20 is reaching end-of-life (see https://nodejs.org/en/about/previous-releases) and pnpm 11 hard-rejects Node releases older than 22.13. The CI matrix targets Node 22, 24, and 25. Upgrading should be straightforward — install a current Node.js release before updating Etherpad.
+- **The official Docker image no longer ships `curl`, `npm`, or `npx`.** These were dropped to remove transitive CVEs (curl/libcurl SMB advisories, npm's bundled picomatch 4.0.3 and brace-expansion 2.0.2). The container's healthcheck now uses `wget` (busybox built-in, always present), and Etherpad provisions `pnpm` via `corepack` for all runtime package operations. If you exec into the container and rely on `curl` or `npm` for ad-hoc tasks, install them on demand with `apk add curl` or use the busybox `wget` / `pnpm` already present.
+
+### Notable enhancements
+
+- **GDPR / privacy controls.** A multi-PR series adds the building blocks operators need to satisfy data-subject requests:
+  - Pad deletion controls (admin-driven and self-service).
+  - IP / privacy audit pass across the codebase.
+  - Author-token cookies are now `HttpOnly`, removing them from JavaScript reach.
+  - Configurable privacy banner shown on first visit.
+  - Author erasure: an authenticated path for purging an individual author's identity and contributions.
+- **Self-update subsystem (Tier 1: notify).**
+  - Periodic check against the GitHub Releases API for the configured repo (default `ether/etherpad`). Configurable via the new `updates.*` settings block, default tier `"notify"`. Set `updates.tier` to `"off"` to disable entirely.
+  - The admin UI shows a banner and a dedicated "Etherpad updates" page with the current version, latest version, install method, and changelog.
+  - Pad users see a discreet footer badge **only** when the running version is severely outdated (one or more major versions behind) or flagged as vulnerable in a recent release manifest. The public endpoint that drives this never leaks the version string itself.
+  - New top-level `adminEmail` setting. When set, the updater emails the admin on first detection of severe / vulnerable status, with escalating cadence (weekly while vulnerable, monthly while severely outdated). PR 1 ships the dedupe + cadence logic; real SMTP wiring lands in a follow-up PR.
+  - Tier 1 ships in this release. Tiers 2 (manual click), 3 (auto with grace window) and 4 (autonomous in maintenance window) are designed and will land in subsequent releases.
+  - See `doc/admin/updates.md` for full configuration.
+- **Pad compaction.** New `compactPad` HTTP API plus `bin/compactPad` and `bin/compactAllPads` CLIs to reclaim database space on long-lived pads with heavy edit history (issue #6194). `--keep N` retains the last N revisions; `--dry-run` previews per-pad rev counts before writing. Per-pad failures don't stop the bulk run.
+  - `bin/compactStalePads` (issue #7642) targets only pads not edited in the last `--older-than N` days, so hot pads in active timeslider use are left alone. Same `--keep` / `--dry-run` shape as `bin/compactAllPads`. Targeting is deliberately a CLI concern — the `compactPad` API surface stays unchanged.
+- **New packaging targets.**
+  - Etherpad is now published as a **Snap** package.
+  - **Debian (.deb)** packages are built via nfpm with a systemd unit, and a signed apt repository is published to `etherpad.org/apt`.
+- **Editor enhancements.**
+  - IDE-style line operations: keyboard shortcuts to duplicate or delete the current line.
+  - New `showMenuRight` URL parameter to hide the right-side toolbar — useful for embeds that need slimmer chrome.
+  - Click a user in the userlist to open chat with `@<name>` prefilled, making mentions discoverable.
+  - New `padOptions.fadeInactiveAuthorColors` setting plus a toolbar UI to fade the background colors of authors who have left the pad.
+- **Color contrast.** Author colors now pick the WCAG-higher-contrast text color for readability.
+- **Social / mobile metadata.** Pad, timeslider, and home views now emit Open Graph and Twitter Card tags (closes #7599) and a `theme-color` meta that matches the toolbar on mobile.
+- **Plugin admin UX.** The `/admin` plugin browser surfaces each plugin's `ep.json` `disables` declarations, so operators can see what a plugin will turn off before installing.
+
+### Notable fixes
+
+- **Socket.io: don't kick authenticated duplicate-author sessions.** A regression where two tabs from the same authenticated author could evict each other has been fixed (#7656 / #7678).
+- **Anchor scrolling.** Anchor-link navigation now waits for layout to settle, so jumping to a deep link no longer overshoots.
+- **Plugin updater.** `bin/updatePlugins.sh` actually updates installed plugins again (closes #6670).
+- **Settings: stable per-release version string.** `randomVersionString` is now derived from the release identity rather than regenerated on each boot, so caches behave correctly across restarts of the same version.
+
+### Internal / contributor-facing
+
+- The HTTP client in the backend has been migrated from `axios` to the built-in `fetch` API, dropping a dependency now that Node 22 ships a stable fetch.
+- `admin/` and `ui/` workspaces moved from `rolldown-vite` to upstream **Vite 8**.
+- Build and CI moved to **pnpm 11** (`packageManager: "pnpm@11.1.2"`); the `Dockerfile`, snap, and all GitHub workflows are aligned. pnpm overrides have been migrated from `package.json` to `pnpm-workspace.yaml` to match pnpm 11's expectations.
+- All client modules have been converted to ESM.
+- The CI matrix tests Node 22, 24, and 25; on PRs the matrix is reduced to a single Node version to keep feedback fast.
+- Frontend Playwright tests now run against the `/ether` plugin set, with feature-tag based skips so plugin-incompatible specs are excluded automatically.
+- Build hardening: signed apt repo publishing, frozen lockfile installs across CI, Node setup pinned in every workflow, and a Docker-image CVE sweep that bumps `npm`, `pnpm`, and `uuid`.
+
+### Localisation
+
+- Multiple updates from translatewiki.net.
+
+# 2.7.2
+
+### Notable enhancements and fixes
+
+- Accessibility pass: corrected dialog semantics, improved focus management, added missing icon labels, and set the `html lang` attribute correctly.
+- Chat: clicking the chat icon works again, disabled toggles render properly, and the username layout no longer overflows.
+- `/export/etherpad` now honors the `:rev` URL segment, so revision-specific exports return the requested revision instead of the latest.
+- Undo / redo now scrolls the viewport to follow the caret, so reverted edits stay in view.
+- Page Down / Page Up now scrolls by viewport height instead of a fixed line count, matching standard editor behavior on tall and short windows alike.
+- Editbar: caret is restored to the pad after changing a toolbar select, so typing continues in the document instead of falling through to the toolbar.
+- Admin: i18n is restored on `/admin` so the admin UI is translated again.
+
+# 2.7.1
+
+### Notable enhancements and fixes
+
+- fixed stop harcoding lang=en, letting the client auto detect locale
+- Stop mutating the shared plugin registry during sanitization
+- Preserve non-breaking space
+
+# 2.7.0
+
+### Breaking changes
+
+- **Abiword has been replaced with LibreOffice for document import/export.** If you were using Abiword for DOCX/ODT/PDF conversion, update your `settings.json` to point `soffice` at your LibreOffice binary. DOCX export is now supported out of the box.
+
+### Notable enhancements
+
+- Added line numbers to the timeslider so you can follow along with specific lines while replaying a pad's history.
+- Added a playback speed setting to the timeslider — you can now scrub through history faster (or slower) than real time.
+- Creator-owned pad settings defaults: the user who creates a pad now seeds its default settings, giving pad creators more control over initial configuration.
+- Cookie names are now configurable via a prefix setting. Useful when running multiple Etherpads on the same domain and you need to keep their session cookies from colliding.
+- Added a new `aceRegisterLineAttributes` hook so plugins can preserve custom line attributes across Enter / line-split operations. Documentation for the hook is included.
+- Added a one-line installer script for getting Etherpad running quickly on a fresh machine.
+- Docker images are now published to GitHub Container Registry (GHCR) in addition to Docker Hub.
+- npm publishing of core and plugins has been migrated to OIDC trusted publishing for stronger supply-chain security.
+
+### Notable fixes
+
+- Database drivers are now bundled with Etherpad again, so fresh installs no longer fail to connect to Postgres, MySQL, and friends out of the box. A regression test has been added to prevent this from breaking again.
+- Pending changesets are now flushed immediately after a reconnect instead of being silently dropped, and users are warned when a pending edit is not accepted by the server.
+- Head revision and atext are now captured atomically, preventing the occasional "mismatched apply" errors on busy pads.
+- Clearing authorship colors can now be undone without forcing a client disconnect.
+- Added periodic cleanup of expired/stale sessions from the database, and fixed a race condition in the session cleanup timeout.
+- Error messages returned to clients are now sanitized by default with deduplication, so internal details no longer leak through error responses.
+- Raised the maximum socket.io message size to 10 MB so large pastes no longer get rejected.
+- Dev mode entrypoint paths now respect the `x-proxy-path` header, fixing reverse-proxy setups in development.
+- Numerous list-related fixes: numbered list wrapped lines now indent correctly, ordered list numbering is preserved across bullet interruptions during export, consecutive numbering survives indented sub-bullets, switching from unordered to ordered resets numbering, and line attributes are preserved across drag-and-drop.
+- Bold (and other) formatting is now retained after copy-paste.
+- Dead-key / compose-key input no longer eats the preceding space.
+- `POST` API requests with a JSON body no longer time out.
+- `appendText` now correctly attributes the new text to the specified author.
+- `createDiffHTML` no longer fails with `Not a changeset: undefined`.
+- Added `padId` to the `padUpdate` / `padCreate` hook context.
+- Fixed `numConnectedUsers` to include the joining user in its count.
+- Accessibility improvements: keyboard trap fix, better screen reader support, and `aria-live` announcements.
+- RTL URL parameter `rtl=false` now correctly disables RTL mode.
+- Language dropdown is now sorted alphabetically by native name.
+- PageDown now advances the caret by a full page of lines.
+- ESM/CJS interop issues in the Settings module that had been breaking plugin compatibility have been resolved, with setters added to the CJS compatibility layer and regression tests in place.
+- Several Docker build fixes: git submodule handling, `hardlink` package-import-method for ZFS, and production-only workspace config.
+
+### Other
+
+- Many occurrences of "etherpad-lite" have been renamed to "etherpad" across the codebase and documentation.
+- Pinned 33 transitive dependencies to patched versions to clear out Dependabot security alerts.
+- Restricted `GITHUB_TOKEN` permissions in the update-plugins workflow.
+
+# 2.6.1
+
+For those wondering where the new updates are and why it was very quite throughout the last 1 1/2 years – I've been working on a new implementation of Etherpad from scratch in Go. It's called Etherpad-Go and you can find it here: `https://github.com/ether/etherpad-go`
+and a short FAQ about it here: https://github.com/ether/etherpad-go/wiki/FAQ . I'd love to hear your feedback about it either on Discord or issue tracker. There is a README.md that explains how to get started and try it out and also the FAQ can be quite fruitful. Latest release can be found here: https://github.com/ether/etherpad-go/releases/tag/v0.0.4
+
+
+### Notable enhancements and fixes of this release
+
+- Minor fixes and improvements to the session transfer feature introduced in 2.6.0
+- Dependencies upgrades
+
+
+# 2.6.0
+
+### Notable enhancements and fixes
+
+- Added native option to transfer your Etherpad session between browsers. If you use multiple browsers or different PC for Etherpad they are different sessions. Meaning typing on one PC and then switching to another one in the same pad will result in different authorship colors. With this new feature you can now transfer your session to another browser or PC. To do so, open the home page and click on the wheel icon in the top right corner. After that click through the first dialog prompting you to copy a code to your clipboard. On your second browser open the same dialog and switch to "Receive Session" tab. There you can paste the code you copied before and click on "Receive Session". After that your session is transferred, and you can continue editing with the same authorship color as before. Just be aware that you can't have two active sessions at once in a pad.
+- Updated to oidc provider v2.6.0 after resolving compatibility issues.
+
+🎉 For all the people celebrating: Have a happy and awesome new year! 🎉 There is something big on the horizon for Etherpad in 2026. Stay tuned!
+
+# 2.5.3
+
+### Notable enhancements and fixes
+- Fixed an issue with the release script that caused the release to not be created correctly.
+
+# 2.5.2
+
+### Notable enhancements and fixes
+
+- Fixes the no skin theme having an overlapping
+- Adds a new setting to disable recent pads to be shown. By setting `showRecentPads` to false in the `settings.json` file you can disable the recent pads feature on the home screen.
+- Sets the oidc-provider version to 9.5.1 as 9.5.2 crashes Etherpad on startup.
+
+# 2.5.1
+
+### Notable enhancements and fixes
+
+- Added endpoint for prometheus scraping. You can now scrape the metrics endpoint with prometheus. It is available at /stats/prometheus if you have enableMetrics set to true in your settings.json
+
+- fixed exposeVersion causing the pad panel to not load correctly
+- fixed admin manage pad url to also take the base path into account
+
+# 2.5.0
+
+### Notable enhancements and fixes
+
+- Updated to express 5.0.0. This is a major update to express that brings a lot of improvements and fixes. Please update all your plugins to the latest version to ensure compatibility. A lot changed in the route matching, and thus old plugins will throw errors and crash Etherpad.
+- Fixed an issue with the no-skin theme with cookie recentPadList feature
+- Fixed layout issues with the no-skin theme
+
+# 2.4.2
+
+### Notable enhancements and fixes
+- Fixed a german translation in the english translation file.
+
+# 2.4.1
+
+### Notable enhancements and fixes
+
+- Added generating release through ci cd pipeline.
+- Readded temporarily disabled workflows after release generation works again
+
+# 2.4.0
+
+### Notable enhancements and fixes
+- Added home button to the pad panel. To show it in your current instance, please copy the updated "toolbar" settings from the `settings.json.template` file to your `settings.json` file.
+- Added more current design for the default collibri theme.
+- Added handling of recent visited pads in the collibri theme. You can now access the most recent three pads you visited in the pad panel.
+- Disable stats endpoints if enableMetrics is set to false. This allows you to disable the metrics endpoints if you don't want to use them.
+- Use Node LTS instead of always latest Node version.
+
+
+# 2.3.2
+
+### Notable enhancements and fixes
+
+- Fixed admin ui displaying incorrect text
+
+# 2.3.1
+
+### Notable enhancements and fixes
+
+- Dependency updates
+
+# 2.3.0
+
+### Notable enhancements and fixes
+
+- Added possibility to cluster Etherpads behind reverse proxy. There is now a new reverse proxy designed for Etherpads that handles multiple Etherpads and the created pads in them. It will assign the pad assignement to an Etherpad at random but once the choice was made it will always reverse proxy the same backend. This allows to host multiple concurrent Etherpads and benefit from multi core systems even though one Etherpad is singlethreaded.
+- Added reverse proxy configuration for replacing Nginx. In the past there were some issues with nginx and its configuration. This reverse proxy allows you to handle your configuration with ease.
+
+If you want to find out more about the reverse proxy method check out the repository https://github.com/ether/etherpad-proxy . It also contains a sample docker-compose file with three Etherpads and one etherpad-proxy. Of course you need to adapt the settings.json.template to your liking and map it into the reverse proxy image before you are ready :).
+
+
+- Added client authorization to work with Etherpad. Before it would get blocked because it doesn't have the required claim. As this is now fixed etherpad-proxy can also work with your new OAuth2 configuration and retrieve a token via client credentials flow.
+
+
+
+
+# 2.2.7
+
+
+### Notable enhancements and fixes
+
+- We migrated all important pages to React 19 and React Router v7
+
+Besides that only dependency updates.
+
+
+ -> Have a merry Christmas and a happy new year.  🎄 🎁
+
+
+# 2.2.6
+
+### Notable enhancements and fixes
+
+- Added option to delete a pad by the creator. This option can be found in the settings menu. When you click on it you get a confirm dialog and after that you have the chance to completely erase the pad.
+
+
+# 2.2.5
+
+### Notable enhancements and fixes
+
+- Fixed timeslider not scrolling when the revision count is a multiple of 100
+- Added new Restful API for version 2 of Etherpad. It is available at /api-docs
+
+
+# 2.2.4
+
+### Notable enhancements and fixes
+
+- Switched to new SQLite backend
+- Fixed rusty-store-kv module not found
+
+
+# 2.2.3
+
+### Notable enhancements and fixes
+
+- Introduced a new in process database `rustydb` that represents a fast key value store written in Rust.
+- Readded window._ as a shortcut for getting text
+- Added support for migrating any ueberdb database to another. You can now switch as you please. See here: https://docs.etherpad.org/cli.html
+- Further Typescript movements
+- A lot of security issues fixed and reviewed in this release. Please update.
+
+
+# 2.2.2
+
+### Notable enhancements and fixes
+
+- Removal of Etherpad require kernel: We finally managed to include esbuild to bundle our frontend code together. So no matter how many plugins your server has it is always one JavaScript file. This boosts performance dramatically.
+- Added log layoutType: This lets you print the log in either colored or basic (black and white text)
+- Introduced esbuild for bundling CSS files
+- Cache all files to be bundled in memory for faster load speed
+
+
+# 2.1.1
+
+
+### Notable enhancements and fixes
+
+- Fixed failing Docker build when checked out as git submodule. Thanks to @neurolabs
+- Fixed: Fallback to websocket and polling when unknown(old) config is present for socket io
+- Fixed: Next page disabled if zero page by @samyakj023
+- On CTRL+CLICK bring the window back to focus by Helder Sepulveda
+
+# 2.1.0
+
+### Notable enhancements and fixes
+
+- Added PWA support. You can now add your Etherpad instance to your home screen on your mobile device or desktop.
+- Fixed live plugin manager versions clashing. Thanks to @yacchin1205
+- Fixed a bug in the pad panel where pagination was not working correctly when sorting by pad name
+
+### Compatibility changes
+
+- Reintroduced APIKey.txt support. You can now switch between APIKey and OAuth2.0 authentication. This can be toggled with the setting authenticationMethod. The default is OAuth2. If you want to use the APIKey method you can set that to `apikey`.
+
+
+# 2.0.3
+
+### Notable enhancements and fixes
+
+- Added documentation for replacing apikeys with oauth2
+- Bumped live plugin manager to 0.20.0. Thanks to @fgreinacher
+- Added better documentation for using docker-compose with Etherpad
+
+
+
+# 2.0.2
+
+### Notable enhancements and fixes
+
+- Fixed the locale loading in the admin panel
+- Added OAuth2.0 support for the Etherpad API. You can now log in  into the Etherpad API with your admin user using OAuth2
+
+### Compatibility changes
+
+- The tests now require generating a token from the OAuth secret. You can find the `generateJWTToken` in the common.ts script for plugin endpoint updates.
+
+
+# 2.0.1
+
+### Notable enhancements and fixes
+
+- Fixed a bug where a plugin depending on a scoped dependency would not install successfully.
+
+
+# 2.0.0
+
+
+### Compatibility changes
+
+- Socket io has been updated to 4.7.5. This means that the json.send function won't work anymore and needs to be changed to .emit('message', myObj)
+- Deprecating npm version 6 in favor of pnpm: We have made the decision to switch to the well established pnpm (https://pnpm.io/). It works by symlinking dependencies into a global directory allowing you to have a cleaner and more reliable environment.
+- Introducing Typescript to the Etherpad core: Etherpad core logic has been rewritten in Typescript allowing for compiler checking of errors.
+- Rewritten Admin Panel: The Admin panel has been rewritten in React and now features a more pleasant user experience. It now also features an integrated pad searching with sorting functionality.
+
+### Notable enhancements and fixes
+
+* Bugfixes
+  - Live Plugin Manager: The live plugin manager caused problems when a plugin had depdendencies defined. This issue is now resolved.
+
+* Enhancements
+  - pnpm Workspaces: In addition to pnpm we introduced workspaces. A clean way to manage multiple bounded contexts like the admin panel or the bin folder.
+  - Bin folder: The bin folder has been moved from the src folder to the root folder. This change was necessary as the contained scripts do not represent core functionality of the user.
+  - Starting Etherpad: Etherpad can now be started with a single command: `pnpm run prod` in the root directory.
+  - Installing Etherpad: Etherpad no longer symlinks itself in the root directory. This is now also taken care by pnpm, and it just creates a node_modules folder with the src directory`s ep_etherpad-lite folder
+  - Plugins can now be installed simply via the command: `pnpm run plugins i first-plugin second-plugin` or if you want to install from path you can do:
+  `pnpm run plugins i --path ../path-to-plugin`
+
+
+# 1.9.7
+
+### Notable enhancements and fixes
+
+* Added Live Plugin Manager: Plugins are now installed into a separate folder on the host system. This folder is called `plugin_packages`.
+That way the plugins are separated from the normal etherpad installation.
+* Make repairPad.js more verbose
+* Fixed favicon not being loaded correctly
+
+# 1.9.6
+
+### Notable enhancements and fixes
+
+* Prevent etherpad crash when update server is not reachable
+* Use npm@6 in Docker build
+* Fix setting the log level in settings.json
+
+
+# 1.9.5
+
+### Compatibility changes
+
+* This version deprecates NodeJS16 as it reached its end of life and won't receive any updates. So to get started with Etherpad v1.9.5 you need NodeJS 18 and above.
+* The bundled windows NodeJS version has been bumped to the current LTS version 20.
+
+### Notable enhancements and fixes
+
+* The support for the tidy program to tidy up HTML files has been removed. This decision was made because it hasn't been updated for years and also caused an incompability when exporting a pad with Abiword.
+
+
+# 1.9.4
+
+### Compatibility changes
+
+* Log4js has been updated to the latest version. As it involved a bump of 6 major version.
+  A lot has changed since then. Most notably the console appender has been deprecated. You can find out more about it [here](https://github.com/log4js-node/log4js-node)
+
+### Notable enhancements and fixes
+
+* Fix for MySQL: The logger calls were incorrectly configured leading to a crash when e.g. somebody uses a different encoding than standard MySQL encoding.
+
+# 1.9.3
+
+### Compability changes
+
+* express-rate-limit has been bumped to 7.0.0: This involves the breaking change that "max: 0"
+in the importExportRateLimiting is set to always trigger. So set it to your desired value.
+If you haven't changed that value in the settings.json you are all set.
+
+### Notable enhancements and fixes
+
+* Bugfixes
+  * Fix etherpad crashing with mongodb database
+
+* Enhancements
+  * Add surrealdb database support. You can find out more about this database [here](https://surrealdb.com).
+  * Make sqlite faster: The sqlite library has been switched to better-sqlite3. This should lead to better performance.
+
+# 1.9.2
+
+### Notable enhancements and fixes
+
+* Security
+  * Enable session key rotation: This setting can be enabled in the settings.json. It changes the signing key for the cookie authentication in a fixed interval.
+
+* Bugfixes
+  * Fix appendRevision when creating a new pad via the API without a text.
+
+
+* Enhancements
+  * Bump JQuery to version 3.7
+  * Update elasticsearch connector to version 8
+
+### Compatibility changes
+
+* No compability changes as JQuery maintains excellent backwards compatibility.
+
+#### For plugin authors
+
+* Please update to JQuery 3.7. There is an excellent deprecation guide over [here](https://api.jquery.com/category/deprecated/). Version 3.1 to 3.7 are relevant for the upgrade.
+
+# 1.9.1
+
+### Notable enhancements and fixes
+
+* Security
+  * Limit requested revisions in timeslider and export to head revision. (affects v1.9.0)
+
+* Bugfixes
+  * revisions in `CHANGESET_REQ` (timeslider) and export (txt, html, custom)
+    are now checked to be numbers.
+  * bump sql for audit fix
+* Enhancements
+  * Add keybinding meta-backspace to delete to beginning of line
+  * Fix automatic Windows build via GitHub Actions
+  * Enable docs to be build cross platform thanks to asciidoctor
+
+### Compatibility changes
+* tests: drop windows 7 test coverage & use chrome latest for admin tests
+* Require Node 16 for Etherpad and target Node 20 for testing
+
+
+# 1.9.0
+
+### Notable enhancements and fixes
+
+* Windows build:
+  * The bundled `node.exe` was upgraded from v12 to v16.
+  * The bundled `node.exe` is now a 64-bit executable. If you need the 32-bit
+    version you must download and install Node.js yourself.
+* Improvements to login session management:
+  * `express_sid` cookies and `sessionstorage:*` database records are no longer
+    created unless `requireAuthentication` is `true` (or a plugin causes them to
+    be created).
+  * Login sessions now have a finite lifetime by default (10 days after
+    leaving).
+  * `sessionstorage:*` database records are automatically deleted when the login
+    session expires (with some exceptions that will be fixed in the future).
+  * Requests for static content (e.g., `/robots.txt`) and special pages (e.g.,
+    the HTTP API, `/stats`) no longer create login session state.
+  * The secret used to sign the `express_sid` cookie is now automatically
+    regenerated every day (called *key rotation*) by default. If key rotation is
+    enabled, the now-deprecated `SESSIONKEY.txt` file can be safely deleted
+    after Etherpad starts up (its content is read and saved to the database and
+    used to validate signatures from old cookies until they expire).
+* The following settings from `settings.json` are now applied as expected (they
+  were unintentionally ignored before):
+  * `padOptions.lang`
+  * `padOptions.showChat`
+  * `padOptions.userColor`
+  * `padOptions.userName`
+* HTTP API:
+  * Fixed the return value of `getText` when called with a specific revision.
+  * Fixed a potential attribute pool corruption bug with
+    `copyPadWithoutHistory`.
+  * Mappings created by `createGroupIfNotExistsFor` are now removed from the
+    database when the group is deleted.
+  * Fixed race conditions in the `setText`, `appendText`, and `restoreRevision`
+    functions.
+  * Added an optional `authorId` parameter to `appendText`,
+    `copyPadWithoutHistory`, `createGroupPad`, `createPad`, `restoreRevision`,
+    `setHTML`, and `setText`, and bumped the latest API version to 1.3.0.
+* Fixed a crash if the database is busy enough to cause a query timeout.
+* New `/health` endpoint for getting information about Etherpad's health (see
+  [draft-inadarei-api-health-check-06](https://www.ietf.org/archive/id/draft-inadarei-api-health-check-06.html)).
+* Docker now uses the new `/health` endpoint for health checks, which avoids
+  issues when authentication is enabled. It also avoids the unnecessary creation
+  of database records for managing browser sessions.
+* When copying a pad, the pad's records are copied in batches to avoid database
+  timeouts with large pads.
+* Exporting a large pad to `.etherpad` format should be faster thanks to bulk
+  database record fetches.
+* When importing an `.etherpad` file, records are now saved to the database in
+  batches to avoid database timeouts with large pads.
+
+#### For plugin authors
+
+* New `expressPreSession` server-side hook.
+* Pad server-side hook changes:
+  * `padCheck`: New hook.
+  * `padCopy`: New `srcPad` and `dstPad` context properties.
+  * `padDefaultContent`: New hook.
+  * `padRemove`: New `pad` context property.
+* The `db` property on Pad objects is now public.
+* New `getAuthorId` server-side hook.
+* New APIs for processing attributes: `ep_etherpad-lite/static/js/attributes`
+  (low-level API) and `ep_etherpad-lite/static/js/AttributeMap` (high-level
+  API).
+* The `import` server-side hook has a new `ImportError` context property.
+* New `exportEtherpad` and `importEtherpad` server-side hooks.
+* The `handleMessageSecurity` and `handleMessage` server-side hooks have a new
+  `sessionInfo` context property that includes the user's author ID, the pad ID,
+  and whether the user only has read-only access.
+* The `handleMessageSecurity` server-side hook can now be used to grant write
+  access for the current message only.
+* The `init_<pluginName>` server-side hooks have a new `logger` context
+  property that plugins can use to log messages.
+* Prevent infinite loop when exiting the server
+* Bump dependencies
+
+
+### Compatibility changes
+
+* Node.js v14.15.0 or later is now required.
+* The default login session expiration (applicable if `requireAuthentication` is
+  `true`) changed from never to 10 days after the user leaves.
+
+#### For plugin authors
+
+* The `client` context property for the `handleMessageSecurity` and
+  `handleMessage` server-side hooks is deprecated; use the `socket` context
+  property instead.
+* Pad server-side hook changes:
+  * `padCopy`:
+    * The `originalPad` context property is deprecated; use `srcPad` instead.
+    * The `destinationID` context property is deprecated; use `dstPad.id`
+      instead.
+  * `padCreate`: The `author` context property is deprecated; use the new
+    `authorId` context property instead. Also, the hook now runs asynchronously.
+  * `padLoad`: Now runs when a temporary Pad object is created during import.
+    Also, it now runs asynchronously.
+  * `padRemove`: The `padID` context property is deprecated; use `pad.id`
+    instead.
+  * `padUpdate`: The `author` context property is deprecated; use the new
+    `authorId` context property instead. Also, the hook now runs asynchronously.
+* Returning `true` from a `handleMessageSecurity` hook function is deprecated;
+  return `'permitOnce'` instead.
+* Changes to the `src/static/js/Changeset.js` library:
+  * The following attribute processing functions are deprecated (use the new
+    attribute APIs instead):
+    * `attribsAttributeValue()`
+    * `eachAttribNumber()`
+    * `makeAttribsString()`
+    * `opAttributeValue()`
+  * `opIterator()`: Deprecated in favor of the new `deserializeOps()` generator
+    function.
+  * `appendATextToAssembler()`: Deprecated in favor of the new `opsFromAText()`
+    generator function.
+  * `newOp()`: Deprecated in favor of the new `Op` class.
+* The `AuthorManager.getAuthor4Token()` function is deprecated; use the new
+  `AuthorManager.getAuthorId()` function instead.
+* The exported database records covered by the `exportEtherpadAdditionalContent`
+  server-side hook now include keys like `${customPrefix}:${padId}:*`, not just
+  `${customPrefix}:${padId}`.
+* Plugin locales should overwrite core's locales Stale
+* Plugin locales overwrite core locales
+
+# 1.8.18
+
+Released: 2022-05-05
+
+### Notable enhancements and fixes
+
+  * Upgraded ueberDB to fix a regression with CouchDB.
+
+# 1.8.17
+
+Released: 2022-02-23
+
+### Security fixes
+
+* Fixed a vunlerability in the `CHANGESET_REQ` message handler that allowed a
+  user with any access to read any pad if the pad ID is known.
+
+### Notable enhancements and fixes
+
+* Fixed a bug that caused all pad edit messages received at the server to go
+  through a single queue. Now there is a separate queue per pad as intended,
+  which should reduce message processing latency when many pads are active at
+  the same time.
+
+# 1.8.16
+
+### Security fixes
+
+If you cannot upgrade to v1.8.16 for some reason, you are encouraged to try
+cherry-picking the fixes to the version you are running:
+
+```shell
+git cherry-pick b7065eb9a0ec..77bcb507b30e
+```
+
+* Maliciously crafted `.etherpad` files can no longer overwrite arbitrary
+  non-pad database records when imported.
+* Imported `.etherpad` files are now subject to numerous consistency checks
+  before any records are written to the database. This should help avoid
+  denial-of-service attacks via imports of malformed `.etherpad` files.
+
+### Notable enhancements and fixes
+
+* Fixed several `.etherpad` import bugs.
+* Improved support for large `.etherpad` imports.
+
+# 1.8.15
+
+### Security fixes
+
+* Fixed leak of the writable pad ID when exporting from the pad's read-only ID.
+  This only matters if you treat the writeable pad IDs as secret (e.g., you are
+  not using [ep_padlist2](https://www.npmjs.com/package/ep_padlist2)) and you
+  share the pad's read-only ID with untrusted users. Instead of treating
+  writeable pad IDs as secret, you are encouraged to take advantage of
+  Etherpad's authentication and authorization mechanisms (e.g., use
+  [ep_openid_connect](https://www.npmjs.com/package/ep_openid_connect) with
+  [ep_readonly_guest](https://www.npmjs.com/package/ep_readonly_guest), or write
+  your own
+  [authentication](https://etherpad.org/doc/v1.8.14/#index_authenticate) and
+  [authorization](https://etherpad.org/doc/v1.8.14/#index_authorize) plugins).
+* Updated dependencies.
+
+### Compatibility changes
+
+* The `logconfig` setting is deprecated.
+
+#### For plugin authors
+
+* Etherpad now uses [jsdom](https://github.com/jsdom/jsdom) instead of
+  [cheerio](https://cheerio.js.org/) for processing HTML imports. There are two
+  consequences of this change:
+  * `require('ep_etherpad-lite/node_modules/cheerio')` no longer works. To fix,
+    your plugin should directly depend on `cheerio` and do `require('cheerio')`.
+  * The `collectContentImage` hook's `node` context property is now an
+    [`HTMLImageElement`](https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement)
+    object rather than a Cheerio Node-like object, so the API is slightly
+    different. See
+    [citizenos/ep_image_upload#49](https://github.com/citizenos/ep_image_upload/pull/49)
+    for an example fix.
+* The `clientReady` server-side hook is deprecated; use the new `userJoin` hook
+  instead.
+* The `init_<pluginName>` server-side hooks are now run every time Etherpad
+  starts up, not just the first time after the named plugin is installed.
+* The `userLeave` server-side hook's context properties have changed:
+  * `auth`: Deprecated.
+  * `author`: Deprecated; use the new `authorId` property instead.
+  * `readonly`: Deprecated; use the new `readOnly` property instead.
+  * `rev`: Deprecated.
+* Changes to the `src/static/js/Changeset.js` library:
+  * `opIterator()`: The unused start index parameter has been removed, as has
+    the unused `lastIndex()` method on the returned object.
+  * `smartOpAssembler()`: The returned object's `appendOpWithText()` method is
+    deprecated without a replacement available to plugins (if you need one, let
+    us know and we can make the private `opsFromText()` function public).
+  * Several functions that should have never been public are no longer exported:
+    `applyZip()`, `assert()`, `clearOp()`, `cloneOp()`, `copyOp()`, `error()`,
+    `followAttributes()`, `opString()`, `stringOp()`, `textLinesMutator()`,
+    `toBaseTen()`, `toSplices()`.
+
+### Notable enhancements and fixes
+
+* Accessibility fix for JAWS screen readers.
+* Fixed "clear authorship" error (see issue #5128).
+* Etherpad now considers square brackets to be valid URL characters.
+* The server no longer crashes if an exception is thrown while processing a
+  message from a client.
+* The `useMonospaceFontGlobal` setting now works (thanks @Lastpixl!).
+* Chat improvements:
+  * The message input field is now a text area, allowing multi-line messages
+    (use shift-enter to insert a newline).
+  * Whitespace in chat messages is now preserved.
+* Docker improvements:
+  * New `HEALTHCHECK` instruction (thanks @Gared!).
+  * New `settings.json` variables: `DB_COLLECTION`, `DB_URL`,
+    `SOCKETIO_MAX_HTTP_BUFFER_SIZE`, `DUMP_ON_UNCLEAN_EXIT` (thanks
+    @JustAnotherArchivist!).
+  * `.ep_initialized` files are no longer created.
+* Worked around a [Firefox Content Security Policy
+  bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1721296) that caused CSP
+  failures when `'self'` was in the CSP header. See issue #4975 for details.
+* UeberDB upgraded from v1.4.10 to v1.4.18. For details, see the [ueberDB
+  changelog](https://github.com/ether/ueberDB/blob/master/CHANGELOG.md).
+  Highlights:
+  * The `postgrespool` driver was renamed to `postgres`, replacing the old
+    driver of that name. If you used the old `postgres` driver, you may see an
+    increase in the number of database connections.
+  * For `postgres`, you can now set the `dbSettings` value in `settings.json` to
+    a connection string (e.g., `"postgres://user:password@host/dbname"`) instead
+    of an object.
+  * For `mongodb`, the `dbName` setting was renamed to `database` (but `dbName`
+    still works for backwards compatibility) and is now optional (if unset, the
+    database name in `url` is used).
+* `/admin/settings` now honors the `--settings` command-line argument.
+* Fixed "Author *X* tried to submit changes as author *Y*" detection.
+* Error message display improvements.
+* Simplified pad reload after importing an `.etherpad` file.
+
+#### For plugin authors
+
+* `clientVars` was added to the context for the `postAceInit` client-side hook.
+  Plugins should use this instead of the `clientVars` global variable.
+* New `userJoin` server-side hook.
+* The `userLeave` server-side hook has a new `socket` context property.
+* The `helper.aNewPad()` function (accessible to client-side tests) now
+  accepts hook functions to inject when opening a pad. This can be used to
+  test any new client-side hooks your plugin provides.
+* Chat improvements:
+  * The `chatNewMessage` client-side hook context has new properties:
+    * `message`: Provides access to the raw message object so that plugins can
+      see the original unprocessed message text and any added metadata.
+    * `rendered`: Allows plugins to completely override how the message is
+      rendered in the UI.
+  * New `chatSendMessage` client-side hook that enables plugins to process the
+    text before sending it to the server or augment the message object with
+    custom metadata.
+  * New `chatNewMessage` server-side hook to process new chat messages before
+    they are saved to the database and relayed to users.
+* Readability improvements to browser-side error stack traces.
+* Added support for socket.io message acknowledgments.
+
+# 1.8.14
+
+### Security fixes
+
+* Fixed a persistent XSS vulnerability in the Chat component. In case you can't
+  update to 1.8.14 directly, we strongly recommend to cherry-pick
+  a7968115581e20ef47a533e030f59f830486bdfa. Thanks to sonarsource for the
+  professional disclosure.
+
+### Compatibility changes
+
+* Node.js v12.13.0 or later is now required.
+* The `favicon` setting is now interpreted as a pathname to a favicon file, not
+  a URL. Please see the documentation comment in `settings.json.template`.
+* The undocumented `faviconPad` and `faviconTimeslider` settings have been
+  removed.
+* MySQL/MariaDB now uses connection pooling, which means you will see up to 10
+  connections to the MySQL/MariaDB server (by default) instead of 1. This might
+  cause Etherpad to crash with a "ER_CON_COUNT_ERROR: Too many connections"
+  error if your server is configured with a low connection limit.
+* Changes to environment variable substitution in `settings.json` (see the
+  documentation comments in `settings.json.template` for details):
+  * An environment variable set to the string "null" now becomes `null` instead
+    of the string "null". Similarly, if the environment variable is unset and
+    the default value is "null" (e.g., `"${UNSET_VAR:null}"`), the value now
+    becomes `null` instead of the string "null". It is no longer possible to
+    produce the string "null" via environment variable substitution.
+  * An environment variable set to the string "undefined" now causes the setting
+    to be removed instead of set to the string "undefined". Similarly, if the
+    environment variable is unset and the default value is "undefined" (e.g.,
+    `"${UNSET_VAR:undefined}"`), the setting is now removed instead of set to
+    the string "undefined". It is no longer possible to produce the string
+    "undefined" via environment variable substitution.
+  * Support for unset variables without a default value is now deprecated.
+    Please change all instances of `"${FOO}"` in your `settings.json` to
+    `${FOO:null}` to keep the current behavior.
+  * The `DB_*` variable substitutions in `settings.json.docker` that previously
+    defaulted to `null` now default to "undefined".
+* Calling `next` without argument when using `Changeset.opIterator` does always
+  return a new Op. See b9753dcc7156d8471a5aa5b6c9b85af47f630aa8 for details.
+
+### Notable enhancements and fixes
+
+* MySQL/MariaDB now uses connection pooling, which should improve stability and
+  reduce latency.
+* Bulk database writes are now retried individually on write failure.
+* Minify: Avoid crash due to unhandled Promise rejection if stat fails.
+* padIds are now included in /socket.io query string, e.g.
+  `https://video.etherpad.com/socket.io/?padId=AWESOME&EIO=3&transport=websocket&t=...&sid=...`.
+  This is useful for directing pads to separate socket.io nodes.
+* <script> elements added via aceInitInnerdocbodyHead hook are now executed.
+* Fix read only pad access with authentication.
+* Await more db writes.
+* Disabled wtfnode dump by default.
+* Send `USER_NEWINFO` messages on reconnect.
+* Fixed loading in a hidden iframe.
+* Fixed a race condition with composition. (Thanks @ingoncalves for an
+  exceptionally detailed analysis and @rhansen for the fix.)
+
+# 1.8.13
+
+### Notable fixes
+
+* Fixed a bug in the safeRun.sh script (#4935)
+* Add more endpoints that do not need authentication/authorization (#4921)
+* Fixed issue with non-opening device keyboard on smartphones (#4929)
+* Add version string to iframe_editor.css to prevent stale cache entry (#4964)
+
+### Notable enhancements
+
+* Refactor pad loading (no document.write anymore) (#4960)
+* Improve import/export functionality, logging and tests (#4957)
+* Refactor CSS manager creation (#4963)
+* Better metrics
+* Add test for client height (#4965)
+
+### Dependencies
+
+* ueberDB2 1.3.2 -> 1.4.4
+* express-rate-limit 5.2.5 -> 5.2.6
+* etherpad-require-kernel 1.0.9 -> 1.0.11
+
+# 1.8.12
+
+Special mention: Thanks to Sauce Labs for additional testing tunnels to help us
+grow! :)
+
+### Security patches
+
+* Fixed a regression in v1.8.11 which caused some pad names to cause Etherpad to
+  restart.
+
+### Notable fixes
+
+* Fixed a bug in the `dirty` database driver that sometimes caused Node.js to
+  crash during shutdown and lose buffered database writes.
+* Fixed a regression in v1.8.8 that caused "Uncaught TypeError: Cannot read
+  property '0' of undefined" with some plugins (#4885)
+* Less warnings in server console for supported element types on import.
+* Support Azure and other network share installations by using a more truthful
+  relative path.
+
+### Notable enhancements
+
+* Dependency updates
+* Various Docker deployment improvements
+* Various new translations
+* Improvement of rendering of plugin hook list and error message handling
+
+# 1.8.11
+
+### Notable fixes
+
+* Fix server crash issue within PadMessageHandler due to SocketIO handling
+* Fix editor issue with drop downs not being visible
+* Ensure correct version is passed when loading front end resources
+* Ensure underscore and jquery are available in original location for plugin comptability
+
+### Notable enhancements
+
+* Improved page load speeds
+
+# 1.8.10
+
+### Security Patches
+
+* Resolve potential ReDoS vulnerability in your project - GHSL-2020-359
+
+### Compatibility changes
+
+* JSONP API has been removed in favor of using the mature OpenAPI implementation.
+* Node 14 is now required for Docker Deployments
+
+### Notable fixes
+
+* Various performance and stability fixes
+
+### Notable enhancements
+
+* Improved line number alignment and user experience around line anchors
+* Notification to admin console if a plugin is missing during user file import
+* Beautiful loading and reconnecting animation
+* Additional code quality improvements
+* Dependency updates
+
+# 1.8.9
+
+### Notable fixes
+
+* Fixed HTTP 400 error when importing via the UI.
+* Fixed "Error: spawn npm ENOENT" crash on startup in Windows.
+
+### Notable enhancements
+
+* Removed some unnecessary arrow key handling logic.
+* Dependency updates.
+
+# 1.8.8
+
+### Security patches
+
+* EJS has been updated to 3.1.6 to mitigate an Arbitrary Code Injection
+
+### Compatibility changes
+
+* Node.js 10.17.0 or newer is now required.
+* The `bin/` and `tests/` directories were moved under `src/`. Symlinks were
+  added at the old locations to hopefully avoid breaking user scripts and other
+  tools.
+* Dependencies are now installed with the `--no-optional` flag to speed
+  installation. Optional dependencies such as `sqlite3` must now be manually
+  installed (e.g., `(cd src && npm i sqlite3)`).
+* Socket.IO messages are now limited to 10K bytes to make denial of service
+  attacks more difficult. This may cause issues when pasting large amounts of
+  text or with plugins that send large messages (e.g., `ep_image_upload`). You
+  can change the limit via `settings.json`; see `socketIo.maxHttpBufferSize`.
+* The top-level `package.json` file, added in v1.8.7, has been removed due to
+  problematic npm behavior. Whenever you install a plugin you will see the
+  following benign warnings that can be safely ignored:
+
+  ```
+  npm WARN saveError ENOENT: no such file or directory, open '.../package.json'
+  npm WARN enoent ENOENT: no such file or directory, open '.../package.json'
+  npm WARN develop No description
+  npm WARN develop No repository field.
+  npm WARN develop No README data
+  npm WARN develop No license field.
+  ```
+
+### Notable enhancements
+
+* You can now generate a link to a specific line number in a pad. Appending
+  `#L10` to a pad URL will cause your browser to scroll down to line 10.
+* Database performance is significantly improved.
+* Admin UI now has test coverage in CI. (The tests are not enabled by default;
+  see `settings.json`.)
+* New stats/metrics: `activePads`, `httpStartTime`, `lastDisconnected`,
+  `memoryUsageHeap`.
+* Improved import UX.
+* Browser caching improvements.
+* Users can now pick absolute white (`#fff`) as their color.
+* The `settings.json` template used for Docker images has new variables for
+  controlling rate limiting.
+* Admin UI now has test coverage in CI. (The tests are not enabled by default
+  because the admin password is required; see `settings.json`.)
+* For plugin authors:
+  * New `callAllSerial()` function that invokes hook functions like `callAll()`
+    except it supports asynchronous hook functions.
+  * `callFirst()` and `aCallFirst()` now support the same wide range of hook
+    function behaviors that `callAll()`, `aCallAll()`, and `callAllSerial()`
+    support. Also, they now warn when a hook function misbehaves.
+  * The following server-side hooks now support asynchronous hook functions:
+    `expressConfigure`, `expressCreateServer`, `padCopy`, `padRemove`
+  * Backend tests for plugins can now use the
+    [`ep_etherpad-lite/tests/backend/common`](src/tests/backend/common.js)
+    module to start the server and simplify API access.
+  * The `checkPlugins.js` script now automatically adds GitHub CI test coverage
+    badges for backend tests and npm publish.
+
+### Notable fixes
+
+* Enter key now stays in focus when inserted at bottom of viewport.
+* Numbering for ordered list items now properly increments when exported to
+  text.
+* Suppressed benign socket.io connection errors
+* Interface no longer loses color variants on disconnect/reconnect event.
+* General code quality is further significantly improved.
+* Restarting Etherpad via `/admin` actions is more robust.
+* Improved reliability of server shutdown and restart.
+* No longer error if no buttons are visible.
+* For plugin authors:
+  * Fixed `collectContentLineText` return value handling.
+
+# 1.8.7
+### Compatibility-breaking changes
+* **IMPORTANT:** It is no longer possible to protect a group pad with a
+  password. All API calls to `setPassword` or `isPasswordProtected` will fail.
+  Existing group pads that were previously password protected will no longer be
+  password protected. If you need fine-grained access control, you can restrict
+  API session creation in your frontend service, or you can use plugins.
+* All workarounds for Microsoft Internet Explorer have been removed. IE might
+  still work, but it is untested.
+* Plugin hook functions are now subject to new sanity checks. Buggy hook
+  functions will cause an error message to be logged
+* Authorization failures now return 403 by default instead of 401
+* The `authorize` hook is now only called after successful authentication. Use
+  the new `preAuthorize` hook if you need to bypass authentication
+* The `authFailure` hook is deprecated; use the new `authnFailure` and
+  `authzFailure` hooks instead
+* The `indexCustomInlineScripts` hook was removed
+* The `client` context property for the `handleMessage` and
+  `handleMessageSecurity` hooks has been renamed to `socket` (the old name is
+  still usable but deprecated)
+* The `aceAttribClasses` hook functions are now called synchronously
+* The format of `ENTER`, `CREATE`, and `LEAVE` log messages has changed
+* Strings passed to `$.gritter.add()` are now expected to be plain text, not
+  HTML. Use jQuery or DOM objects if you need formatting
+
+### Notable new features
+* Users can now import without creating and editing the pad first
+* Added a new `readOnly` user setting that makes it possible to create users in
+  `settings.json` that can read pads but not create or modify them
+* Added a new `canCreate` user setting that makes it possible to create users in
+  `settings.json` that can modify pads but not create them
+* The `authorize` hook now accepts `readOnly` to grant read-only access to a pad
+* The `authorize` hook now accepts `modify` to grant modify-only (creation
+  prohibited) access to a pad
+* All authentication successes and failures are now logged
+* Added a new `cookie.sameSite` setting that makes it possible to enable
+  authentication when Etherpad is embedded in an iframe from another site
+* New `exportHTMLAdditionalContent` hook to include additional HTML content
+* New `exportEtherpadAdditionalContent` hook to include additional database
+  content in `.etherpad` exports
+* New `expressCloseServer` hook to close Express when required
+* The `padUpdate` hook context now includes `revs` and `changeset`
+* `checkPlugin.js` has various improvements to help plugin developers
+* The HTTP request object (and therefore the express-session state) is now
+  accessible from within most `eejsBlock_*` hooks
+* Users without a `password` or `hash` property in `settings.json` are no longer
+  ignored, so they can now be used by authentication plugins
+* New permission denied modal and block ``permissionDenied``
+* Plugins are now updated to the latest version instead of minor or patches
+
+### Notable fixes
+* Fixed rate limit accounting when Etherpad is behind a reverse proxy
+* Fixed typos that prevented access to pads via an HTTP API session
+* Fixed authorization failures for pad URLs containing a percent-encoded
+  character
+* Fixed exporting of read-only pads
+* Passwords are no longer written to connection state database entries or logged
+  in debug logs
+* When using the keyboard to navigate through the toolbar buttons the button
+  with the focus is now highlighted
+* Fixed support for Node.js 10 by passing the `--experimental-worker` flag
+* Fixed export of HTML attributes within a line
+* Fixed occasional "Cannot read property 'offsetTop' of undefined" error in
+  timeslider when "follow pad contents" is checked
+* socket.io errors are now displayed instead of silently ignored
+* Pasting while the caret is in a link now works (except for middle-click paste
+  on X11 systems)
+* Removal of Microsoft Internet Explorer specific code
+* Import better handles line breaks and white space
+* Fix issue with ``createDiffHTML`` incorrect call of ``getInternalRevisionAText``
+* Allow additional characters in URLs
+* MySQL engine fix and various other UeberDB updates (See UeberDB changelog).
+* Admin UI improvements on search results (to remove duplicate items)
+* Removal of unused cruft from ``clientVars`` (``ip`` and ``userAgent``)
+
+
+### Minor changes
+* Temporary disconnections no longer force a full page refresh
+* Toolbar layout for narrow screens is improved
+* Fixed `SameSite` cookie attribute for the `language`, `token`, and `pref`
+  cookies
+* Fixed superfluous database accesses when deleting a pad
+* Expanded test coverage.
+* `package-lock.json` is now lint checked on commit
+* Various lint fixes/modernization of code
+
+# 1.8.6
+* IMPORTANT: This fixes a severe problem with postgresql in 1.8.5
+* SECURITY: Fix authentication and authorization bypass vulnerabilities
+* API: Update version to 1.2.15
+* FEATURE: Add copyPadWithoutHistory API (#4295)
+* FEATURE: Package more asset files to save http requests (#4286)
+* MINOR: Improve UI when reconnecting
+* TESTS: Improve tests
+
+# 1.8.5
+* IMPORTANT DROP OF SUPPORT: Drop support for IE.  Browsers now need async/await.
+* IMPORTANT SECURITY: Rate limit Commits when env=production
+* SECURITY: Non completed uploads no longer crash Etherpad
+* SECURITY: Log authentication requests
+* FEATURE: Support ES6 (migrate from Uglify-JS to Terser)
+* FEATURE: Improve support for non-cookie enabled browsers
+* FEATURE: New hooks for ``index.html``
+* FEATURE: New script to delete sessions.
+* FEATURE: New setting to allow import withing an author session on a pad
+* FEATURE: Checks Etherpad version on startup and notifies if update is available.  Also available in ``/admin`` interface.
+* FEATURE: Timeslider updates pad location to most recent edit
+* MINOR: Outdent UL/LI items on removal of list item
+* MINOR: Various UL/LI import/export bugs
+* MINOR: PDF export fix
+* MINOR: Front end tests no longer run (and subsequently error) on pull requests
+* MINOR: Fix issue with </li> closing a list before it opens
+* MINOR: Fix bug where large pads would fire a console error in timeslider
+* MINOR: Fix ?showChat URL param issue
+* MINOR: Issue where timeslider URI fails to be correct if padID is numeric
+* MINOR: Include prompt for clear authorship when entire document is selected
+* MINOR: Include full document aText every 100 revisions to make pad restoration on database corruption achievable
+* MINOR: Several Colibris CSS fixes
+* MINOR: Use mime library for mime types instead of hard-coded.
+* MINOR: Don't show "new pad button" if instance is read only
+* MINOR: Use latest NodeJS when doing Windows build
+* MINOR: Change disconnect logic to reconnect instead of silently failing
+* MINOR: Update SocketIO, async, jQuery and Mocha which were stuck due to stale code.
+* MINOR: Rewrite the majority of the ``bin`` scripts to use more modern syntax
+* MINOR: Improved CSS anomation through prefers-reduced-motion
+* PERFORMANCE: Use workers (where possible) to minify CSS/JS on first page request.  This improves initial startup times.
+* PERFORMANCE: Cache EJS files improving page load speed when maxAge > 0.
+* PERFORMANCE: Fix performance for large pads
+* TESTS: Additional test coverage for OL/LI/Import/Export
+* TESTS: Include Simulated Load Testing in CI.
+* TESTS: Include content collector tests to test contentcollector.js logic external to pad dependents.
+* TESTS: Include fuzzing import test.
+* TESTS: Ensure CI is no longer using any cache
+* TESTS: Fix various tests...
+* TESTS: Various additional Travis testing including libreoffice import/export
+
+# 1.8.4
+* FIX: fix a performance regression on MySQL introduced in 1.8.3
+* FIX: when running behind a reverse proxy and exposed in an inner directory, fonts and toolbar icons should now be visible. This is a regression introduced in 1.8.3
+* FIX: cleanups in the UI after the CSS rehaul of 1.8.3
+* MINOR: protect against bugged/stale UI elements after updates. An explicit cache busting via random query string is performed at each start. This needs to be replaced with hashed names in static assets.
+* MINOR: improved some tests
+* MINOR: fixed long-standing bugs in the maintenance tools in /bin (migrateDirtyDBtoRealDB, rebuildPad, convert, importSqlFile)
+
+# 1.8.3
+* FEATURE: colibris is now the default skin for new installs
+* FEATURE: improved colibris visuals, and migrated to Flexbox layout
+* FEATURE: skin variants: colibris skin colors can be easily customized. Visit http://127.0.0.1:9001/p/test#skinvariantsbuilder
+* REQUIREMENTS: minimum required Node version is **10.13.0 LTS**.
+* MINOR: stability fixes for the async migration in 1.8.0 (fixed many UnhandledPromiseRejectionWarning and the few remaining crashes)
+* MINOR: improved stability of import/export functionality
+* MINOR: fixed many small UI quirks (timeslider, import/export, chat)
+* MINOR: Docker images are now built & run in production mode by default
+* MINOR: reduced the size of the Docker images
+* MINOR: better documented cookies and configuration parameters of the Docker image
+* MINOR: better database support (especially MySQL)
+* MINOR: additional test coverage
+* MINOR: restored compatibility with ep_hash_auth
+* MINOR: migrate from swagger-node-express to openapi-backend
+* MINOR: honor the Accept-Language HTTP headers sent by browsers, eventually serving language variants
+* PERFORMANCE: correctly send HTTP/304 for minified files
+* SECURITY: bumped many dependencies. At the time of the release, this version has 0 reported vulnerabilities by npm audit
+* SECURITY: never send referrer when opening a link
+* SECURITY: rate limit imports and exports
+* SECURITY: do not allow pad import if a user never contributed to that pad
+* SECURITY: expose configuration parameter for limiting max import size
+
+*BREAKING CHANGE*: undoing the "clear authorship colors" command is no longer supported (see https://github.com/ether/etherpad-lite/issues/2802)
+*BREAKING CHANGE*: the visuals and CSS structure of the page was updated. Plugins may need a CSS rehaul
+
+# 1.8
+* SECURITY: change referrer policy so that Etherpad addresses aren't leaked when links are clicked (discussion: https://github.com/ether/etherpad-lite/pull/3636)
+* SECURITY: set the "secure" flag for the session cookies when served over SSL. From now on it will not be possible to serve the same instance both in cleartext and over SSL
+
+# 1.8-beta.1
+* FEATURE: code was migrated to `async`/`await`, getting rid of a lot of callbacks (see https://github.com/ether/etherpad-lite/issues/3540)
+* FEATURE: support configuration via environment variables
+* FEATURE: include an official Dockerfile in the main repository
+* FEATURE: support including plugins in custom Docker builds
+* FEATURE: conditional creation of users: when its password is null, a user is not created. This helps, for example, in advanced configuration of Docker images.
+* REQUIREMENTS: minimum required Node version is **8.9.0 LTS**. Release 1.8.3 will require at least Node **10.13.0** LTS
+* MINOR: in the HTTP API, allow URL parameters and POST bodies to co-exist
+* MINOR: fix Unicode bug in HTML export
+* MINOR: bugfixes to colibris chat window
+* MINOR: code simplification (avoided double negations, introduced early exits, ...)
+* MINOR: reduced the size of the Windows package
+* MINOR: upgraded the nodejs runtime to 10.16.3 in the Windows package
+* SECURITY: avoided XSS in IE11
+* SECURITY: the version is exposed in http header only when configured
+* SECURITY: updated vendored jQuery version
+* SECURITY: bumped dependencies
+
+# 1.7.5
+* FEATURE: introduced support for multiple skins. See https://etherpad.org/doc/v1.7.5/#index_skins
+* FEATURE: added a new, optional skin. It can be activated choosing `skinName: "colibris"` in `settings.json`
+* FEATURE: allow file import using LibreOffice
+* SECURITY: updated many dependencies. No known high or moderate risk dependencies remain.
+* SECURITY: generate better random pad names
+* FIX: don't nuke all installed plugins if `npm install` fails
+* FIX: improved LibreOffice export
+* FIX: allow debug mode on node versions >= 6.3
+* MINOR: started making Etherpad less dependent on current working directory when running
+* MINOR: started simplifying the code structure, flattening complex conditions
+* MINOR: simplified a bit the startup scripts
+
+*UPGRADE NOTES*: if you have custom files in `src/static/custom`, save them
+somewhere else, revert the directory contents, update to Etherpad 1.7.5, and
+finally put them back in their new location, uder `src/static/skins/no-skin`.
+
+# 1.7.0
+* FIX: `getLineHTMLForExport()` no longer produces multiple copies of a line. **WARNING**: this could potentially break some plugins
+* FIX: authorship of bullet points no longer changes when a second author edits them
+* FIX: improved Firefox compatibility (non printable keys)
+* FIX: `getPadPlainText()` was not working
+* REQUIREMENTS: minimum required Node version is 6.9.0 LTS. The next release will require at least Node 8.9.0 LTS
+* SECURITY: updated MySQL, Elasticsearch and PostgreSQL drivers
+* SECURITY: started updating deprecated code and packages
+* DOCS: documented --credentials, --apikey, --sessionkey. Better detailed contributors guidelines. Added a section on securing the installation
+
+# 1.6.6
+ * FIX: line numbers are aligned with text again (broken in 1.6.4)
+ * FIX: text entered between connection loss and reconnection was not saved
+ * FIX: diagnostic call failed when etherpad was exposed in a subdirectory
+
+# 1.6.5
+ * SECURITY: Escape data when listing available plugins
+ * FIX: Fix typo in apicalls.js which prevented importing isValidJSONPName
+ * FIX: fixed plugin dependency issue
+ * FIX: Update iframe_editor.css
+ * FIX: unbreak Safari iOS line wrapping
+
+# 1.6.4
+ * SECURITY: Access Control bypass on /admin - CVE-2018-9845
+ * SECURITY: Remote Code Execution through pad export - CVE-2018-9327
+ * SECURITY: Remote Code Execution through JSONP handling - CVE-2018-9326
+ * SECURITY: Pad data leak - CVE-2018-9325
+ * Fix: Admin redirect URL
+ * Fix: Various script Fixes
+ * Fix: Various CSS/Style/Layout fixes
+ * NEW: Improved Pad contents readability
+ * NEW: Hook: onAccessCheck
+ * NEW: SESSIONKEY and APIKey customizable path
+ * NEW: checkPads script
+ * NEW: Support "cluster mode"
+
+# 1.6.3
+ * SECURITY: Update ejs
+ * SECURITY: xss vulnerability when reading window.location.href
+ * SECURITY: sanitize jsonp
+ * NEW: Catch SIGTERM for graceful shutdown
+ * NEW: Show actual applied text formatting for caret position
+ * NEW: Add settings to improve scrolling of viewport on line changes
+
+# 1.6.2
+ * NEW: Added pad shortcut disabling feature
+ * NEW: Create option to automatically reconnect after a few seconds
+ * Update: socket.io to 1.7.3
+ * Update: l10n lib
+ * Update: request to 2.83.0
+ * Update: Node for windows to 8.9.0
+ * Fix: minification of code
+
+# 1.6.1
+ * NEW: Hook aceRegisterNonScrollableEditEvents to register events that shouldn't scroll
+ * NEW: Added 'item' parameter to registerAceCommand Hook
+ * NEW: Added LibreJS support
+ * Fix: Crash on malformed export url
+ * Fix: Re-enable editor after user is reconnected to server
+ * Fix: minification
+ * Other: Added 'no-referrer' for all pads
+ * Other: Improved cookie security
+ * Other: Fixed compatibility with nodejs 7
+ * Other: Updates
+  - socket.io to 1.6.0
+  - express to 4.13.4
+  - express-session to 1.13.0
+  - clean-css to 3.4.12
+  - uglify-js to 2.6.2
+  - log4js to 0.6.35
+  - cheerio to 0.20.0
+  - ejs to 2.4.1
+  - graceful-fs to 4.1.3
+  - semver to 5.1.0
+  - unorm to 1.4.1
+  - jsonminify to 0.4.1
+  - measured to 1.1.0
+  - mocha to 2.4.5
+  - supertest to 1.2.0
+  - npm to 4.0.2
+  - Node.js for Windows to 6.9.2
+
+# 1.6.0
+ * SECURITY: Fix a possible xss attack in iframe link
+ * NEW: Add a aceSelectionChanged hook to allow plugins to react when the cursor location changes.
+ * NEW: Accepting Arrays on 'exportHtmlAdditionalTags' to handle attributes stored as ['key', 'value']
+ * NEW: Allow admin to run on a sub-directory
+ * NEW: Support version 5 of node.js
+ * NEW: Update windows build to node version 4.4.3
+ * NEW: Create setting to control if a new line will be indented or not
+ * NEW: Add an appendText API
+ * NEW: Allow LibreOffice to be used when exporting a pad
+ * NEW: Create hook exportHtmlAdditionalTagsWithData
+ * NEW: Improve DB migration performance
+ * NEW: allow settings to be applied from the filesystem
+ * NEW: remove applySettings hook and allow credentials.json to be part of core
+ * NEW: Use exec to switch to node process
+ * NEW: Validate incoming color codes
+ * Fix: Avoid space removal when pasting text from word processor.
+ * Fix: Removing style that makes editor scroll to the top on iOS without any action from the user
+ * Fix: Fix API call appendChatMessage to send new message to all connected clients
+ * Fix: Timeslider "Return to pad" button
+ * Fix: Generating pad HTML with tags like <span data-TAG="VALUE"> instead of <TAG:VALUE>
+ * Fix: Get git commit hash even if the repo only points to a bare repo.
+ * Fix: Fix decode error if pad name contains special characters and is sanitized
+ * Fix: Fix handleClientMessage_USER_* payloads not containing user info
+ * Fix: Set language cookie on initial load
+ * Fix: Timeslider Not Translated
+ * Other: set charset for mysql connection in settings.json
+ * Other: Dropped support for io.js
+ * Other: Add support to store credentials in credentials.json
+ * Other: Support node version 4 or higher
+ * Other: Update uberDB to version 0.3.0
+
+# 1.5.7
+ * NEW: Add support for intermediate CA certificates for ssl
+ * NEW: Provide a script to clean up before running etherpad
+ * NEW: Use ctrl+shift+1 to do a ordered list
+ * NEW: Show versions of plugins on startup
+ * NEW: Add author on padCreate and padUpdate hook
+ * Fix: switchToPad method
+ * Fix: Dead keys
+ * Fix: Preserve new lines in copy-pasted text
+ * Fix: Compatibility mode on IE
+ * Fix: Content Collector to get the class of the DOM-node
+ * Fix: Timeslider export links
+ * Fix: Double prompt on file upload
+ * Fix: setText() replaces the entire pad text
+ * Fix: Accessibility features on embedded pads
+ * Fix: Tidy HTML before abiword conversion
+ * Fix: Remove edit buttons in read-only view
+ * Fix: Disable user input in read-only view
+ * Fix: Pads end with a single newline, rather than two newlines
+ * Fix: Toolbar and chat for mobile devices
+
+# 1.5.6
+ * Fix: Error on windows installations
+
+# 1.5.5
+ * SECURITY: Also don't allow read files on directory traversal on minify paths
+ * NEW: padOptions can be set in settings.json now
+ * Fix: Add check for special characters in createPad API function
+ * Fix: Middle click on a link in firefox don't paste text anymore
+ * Fix: Made setPadRaw async to import larger etherpad files
+ * Fix: rtl
+ * Fix: Problem in older IEs
+ * Other: Update to express 4.x
+ * Other: Dropped support for node 0.8
+ * Other: Update ejs to version 2.x
+ * Other: Moved sessionKey from settings.json to a new auto-generated SESSIONKEY.txt file
+
+# 1.5.4
+ * SECURITY: Also don't allow read files on directory traversal on frontend tests path
+
+# 1.5.3
+ * NEW: Accessibility support for Screen readers, includes new fonts and keyboard shortcuts
+ * NEW: API endpoint for Append Chat Message and Chat Backend Tests
+ * NEW: Error messages displayed on load are included in Default Pad Text (can be suppressed)
+ * NEW: Content Collector can handle key values
+ * NEW: getAttributesOnPosition Method
+ * FIX: Firefox keeps attributes (bold etc) on cut/copy -> paste
+ * Fix: showControls=false now works
+ * Fix: Cut and Paste works...
+ * SECURITY: Don't allow read files on directory traversal
+
+# 1.5.2
+ * NEW: Support for node version 0.12.x
+ * NEW: API endpoint saveRevision, getSavedRevisionCount and listSavedRevisions
+ * NEW: setting to allow load testing
+ * Fix: Rare scroll issue
+ * Fix: Handling of custom pad path
+ * Fix: Better error handling of imports and exports of type "etherpad"
+ * Fix: Walking caret in chrome
+ * Fix: Better handling for changeset problems
+ * SECURITY Fix: Information leak for etherpad exports (CVE-2015-2298)
+
+# 1.5.1
+ * NEW: High resolution Icon
+ * NEW: Use HTTPS for plugins.json download
+ * NEW: Add 'last update' column
+ * NEW: Show users and chat at the same time
+ * NEW: Support io.js
+ * Fix: removeAttributeOnLine now works properly
+ * Fix: Plugin search and list
+ * Fix: Issue where unauthed request could cause error
+ * Fix: Privacy issue with .etherpad export
+ * Fix: Freeze deps to improve bisectability
+ * Fix: IE, everything. IE is so broken.
+ * Fix: Timeslider proxy
+ * Fix: All backend tests pass
+ * Fix: Better support for Export into HTML
+ * Fix: Timeslider stars
+ * Fix: Translation update
+ * Fix: Check filesystem if Abiword exists
+ * Fix: Docs formatting
+ * Fix: Move Save Revision notification to a gritter message
+ * Fix: UeberDB MySQL Timeout issue
+ * Fix: Indented +9 list items
+ * Fix: Don't paste on middle click of link
+ * SECURITY Fix: Issue where a malformed URL could cause EP to disclose installation location
+
+# 1.5.0
+ * NEW: Lots of performance improvements for page load times
+ * NEW: Hook for adding CSS to Exports
+ * NEW: Allow shardable socket io
+ * NEW: Allow UI to show when attr/prop is applied (CSS)
+ * NEW: Various scripts
+ * NEW: Export full fidelity pads (including authors etc.)
+ * NEW: Various front end tests
+ * NEW: Backend tests
+ * NEW: switchPad hook to instantly switch between pads
+ * NEW: Various translations
+ * NEW: Icon sets instead of images to provide quality high DPI experience
+ * Fix: HTML Import blocking / hanging server
+ * Fix: Export Bullet / Numbered lists HTML
+ * Fix: Swagger deprecated warning
+ * Fix: Bad session from crashing server
+ * Fix: Allow relative settings path
+ * Fix: Stop attributes being improperly assigned between 2 lines
+ * Fix: Copy / Move Pad API race condition
+ * Fix: Save all user preferences
+ * Fix: Upgrade majority of dependency inc upgrade to SocketIO1+
+ * Fix: Provide UI button to restore maximized chat window
+ * Fix: Timeslider UI Fix
+ * Fix: Remove Dokuwiki
+ * Fix: Remove long paths from windows build (stops error during extract)
+ * Fix: Various globals removed
+ * Fix: Move all scripts into bin/
+ * Fix: Various CSS bugfixes for Mobile devices
+ * Fix: Overflow Toolbar
+ * Fix: Line Attribute management
+
+# 1.4.1
+ * NEW: Translations
+ * NEW: userLeave Hook
+ * NEW: Script to reinsert all DB values of a Pad
+ * NEW: Allow for absolute settings paths
+ * NEW: API: Get Pad ID from read Only Pad ID
+ * NEW: Huge improvement on MySQL database read/write (InnoDB to MyISAM)
+ * NEW: Hook for Export File Name
+ * NEW: Preprocessor Hook for DOMLine attributes (allows plugins to wrap entire line contents)
+ * Fix: Exception on Plugin Search and fix for plugins not being fetched
+ * Fix: Font on innerdoc body can be arial on paste
+ * Fix: Fix Dropping of messages in handleMessage
+ * Fix: Don't use Abiword for HTML exports
+ * Fix: Color issues with user Icon
+ * Fix: Timeslider Button
+ * Fix: Session Deletion error
+ * Fix: Allow browser tabs to be cycled when focus is in editor
+ * Fix: Various Editor issues with Easysync potentially entering forever loop on bad changeset
+
+# 1.4
+ * NEW: Disable toolbar items through settings.json
+ * NEW: Internal stats/metrics engine
+ * NEW: Copy/Move Pad API functions
+ * NEW: getAttributeOnSelection method
+ * NEW: CSS function when an attribute is active on caret location
+ * NEW: Various new eejs blocks
+ * NEW: Ace afterEditHook
+ * NEW: Import hook to introduce alternative export methods
+ * NEW: preProcessDomLine allows Domline attributes to be processed before native attributes
+ * Fix: Allow for lighter author colors
+ * Fix: Improved randomness of session tokens
+ * Fix: Don't panic if an author2session/group2session no longer exists
+ * Fix: Gracefully fallback to related languages if chosen language is unavailable
+ * Fix: Various changeset/stability bugs
+ * Fix: Re-enable import buttons after failed import
+ * Fix: Allow browser tabs to be cycled when in editor
+ * Fix: Better Protocol detection
+ * Fix: padList API Fix
+ * Fix: Caret walking issue
+ * Fix: Better settings.json parsing
+ * Fix: Improved import/export handling
+ * Other: Various whitespace/code clean-up
+ * Other: .deb packaging creator
+ * Other: More API Documentation
+ * Other: Lots more translations
+ * Other: Support Node 0.11
+
+# 1.3
+ * NEW: We now follow the semantic versioning scheme!
+ * NEW: Option to disable IP logging
+ * NEW: Localisation updates from https://translatewiki.net.
+ * Fix: Fix readOnly group pads
+ * Fix: don't fetch padList on every request
+
+# 1.2.12
+ * NEW: Add explanations for more disconnect scenarios
+ * NEW: export sessioninfos so plugins can access it
+ * NEW: pass pad in postAceInit hook
+ * NEW: Add trustProxy setting. ALlows to make ep use X-forwarded-for as remoteAddress
+ * NEW: userLeave hook (UNDOCUMENTED)
+ * NEW: Plural macro for translations
+ * NEW: backlinks to main page in Admin pages
+ * NEW: New translations from translatewiki.net
+ * SECURITY FIX: Filter author data sent to clients
+ * FIX: Never keep processing a changeset if it's corrupted
+ * FIX: Some client-side performance fixes for webkit browsers
+ * FIX: Only execute listAllPads query on demand (not on start-up)
+ * FIX: HTML import (don't crash on malformed or blank HTML input; strip title out of html during import)
+ * FIX: check if uploaded file only contains ascii chars when abiword disabled
+ * FIX: Plugin search in /admin/plugins
+ * FIX: Don't create new pad if a non-existent read-only pad is accessed
+ * FIX: Drop messages from unknown connections (would lead to a crash after a restart)
+ * FIX: API: fix createGroupFor endpoint, if mapped group is deleted
+ * FIX: Import form for other locales
+ * FIX: Don't stop processing changeset queue if there is an error
+ * FIX: Caret movement. Chrome detects blank rows line heights as incorrect
+ * FIX: allow colons in password
+ * FIX: Polish logging of client-side errors on the server
+ * FIX: Username url param
+ * FIX: Make start script POSIX ompatible
+
+
+# 1.2.11
+ * NEW: New Hook for outer_ace dynamic css manager and author style hook
+ * NEW: Bump log4js for improved logging
+ * Fix: Remove URL schemes which don't have RFC standard
+ * Fix: Fix safeRun subsequent restarts issue
+ * Fix: Allow safeRun to pass arguments to run.sh
+ * Fix: Include script for more efficient import
+ * Fix: Fix sysv comptibile script
+ * Fix: Fix client side changeset spamming
+ * Fix: Don't crash on no-auth
+ * Fix: Fix some IE8 errors
+ * Fix: Fix authorship sanitation
+
+# 1.2.10
+ * NEW: Broadcast slider is exposed in timeslider so plugins can interact with it
+ * Fix: IE issue where pads wouldn't load due to missing console from i18n
+ * Fix: console issue in collab client would error on cross domain embeds in IE
+ * Fix: Only Restart Etherpad once plugin is installed
+ * Fix: Only redraw lines that exist after drag and drop
+ * Fix: Pasting into ordered list
+ * Fix: Import browser detection
+ * Fix: 2 Part Locale Specs
+ * Fix: Remove language string from chat element
+ * Fix: Make Saved revision Star fade back out on non Top frames
+ * Other: Remove some cruft legacy JS from old Etherpad
+ * Other: Express 3.1.2 breaks sessions, set Express to 3.1.0
+
+# 1.2.91
+ * NEW: Authors can now send custom object messages to other Authors making 3 way conversations possible.  This introduces WebRTC plugin support.
+ * NEW: Hook for Chat Messages Allows for Desktop Notification support
+ * NEW: FreeBSD installation docs
+ * NEW: Ctrl S for save revision makes the Icon glow for a few sconds.
+ * NEW: Various hooks and expose the document ACE object
+ * NEW: Plugin page revamp makes finding and installing plugins more sane.
+ * NEW: Icon to enable sticky chat from the Chat box
+ * Fix: Cookies inside of plugins
+ * Fix: Don't leak event emitters when accessing admin/plugins
+ * Fix: Don't allow user to send messages after they have been "kicked" from a pad
+ * Fix: Refactor Caret navigation with Arrow and Pageup/down keys stops cursor being lost
+ * Fix: Long lines in Firefox now wrap properly
+ * Fix: Session Disconnect limit is increased from 10 to 20 to support slower restarts
+ * Fix: Support Node 0.10
+ * Fix: Log HTTP on DEBUG log level
+ * Fix: Server wont crash on import fails on 0 file import.
+ * Fix: Import no longer fails consistently
+ * Fix: Language support for non existing languages
+ * Fix: Mobile support for chat notifications are now usable
+ * Fix: Re-Enable Editbar buttons on reconnect
+ * Fix: Clearing authorship colors no longer disconnects all clients
+ * Other: New debug information for sessions
+
+# 1.2.9
+ * Fix: MAJOR Security issue, where a hacker could submit content as another user
+ * Fix: security issue due to unescaped user input
+ * Fix: Admin page at /admin redirects to /admin/ now to prevent breaking relative links
+ * Fix: indentation in chrome on linux
+ * Fix: PadUsers API endpoint
+ * NEW: A script to import data to all dbms
+ * NEW: Add authorId to chat and userlist as a data attribute
+ * NEW: Refactor and fix our frontend tests
+ * NEW: Localisation updates
+
+
+# 1.2.81
+ * Fix: CtrlZ-Y for Undo Redo
+ * Fix: RTL functionality on contents & fix RTL/LTR tests and RTL in Safari
+ * Fix: Various other tests fixed in Android
+
+# 1.2.8
+ ! IMPORTANT: New setting.json value is required to automatically reconnect clients on disconnect
+ * NEW: Use Socket IO for rooms (allows for pads to be load balanced with sticky rooms)
+ * NEW: Plugins can now provide their own frontend tests
+ * NEW: Improved server-side logging
+ * NEW: Admin dashboard mobile device support and new hooks for Admin dashboard
+ * NEW: Get current API version from API
+ * NEW: CLI script to delete pads
+ * Fix: Automatic client reconnection on disconnect
+ * Fix: Text Export indentation now supports multiple indentations
+ * Fix: Bugfix getChatHistory API method
+ * Fix: Stop Chrome losing caret after paste is texted
+ * Fix: Make colons on end of line create 4 spaces on indent
+ * Fix: Stop the client disconnecting if a rev is in the wrong order
+ * Fix: Various server crash issues based on rev in wrong order
+ * Fix: Various tests
+ * Fix: Make indent when on middle of the line stop creating list
+ * Fix: Stop long strings breaking the UX by moving focus away from beginning of line
+ * Fix: Redis findKeys support
+ * Fix: padUsersCount no longer hangs server
+ * Fix: Issue with two part locale specs not working
+ * Fix: Make plugin search case insensitive
+ * Fix: Indentation and bullets on text export
+ * Fix: Resolve various warnings on dependencies during install
+ * Fix: Page up / Page down now works in all browsers
+ * Fix: Stop Opera browser inserting two new lines on enter keypress
+ * Fix: Stop timeslider from showing NaN on pads with only one revision
+ * Other: Allow timeslider tests to run and provide & fix various other frontend-tests
+ * Other: Begin dropping reference to Lite.  Etherpad Lite is now named "Etherpad"
+ * Other: Update to latest jQuery
+ * Other: Change loading message asking user to please wait on first build
+ * Other: Allow etherpad to use global npm installation (Safe since node 6.3)
+ * Other: Better documentation for log rotation and log message handling
+
+
+
+# 1.2.7
+ * NEW: notifications are now modularized and can be stacked
+ * NEW: Visit a specific revision in the timeslider by suffixing #%revNumber% IE http://localhost/p/test/timeslider#12
+ * NEW: Link to plugin on Admin page allows admins to easily see plugin details in a new window by clicking on the plugin name
+ * NEW: Automatically see plugins that require update and be able to one click update
+ * NEW: API endpoints for Chat .. getChatHistory, getChatHead
+ * NEW: API endpoint to see a pad diff in HTML format from revision x to revision y .. createPadDiffHTML
+ * NEW: Real time plugin search & unified menu UI for admin pages
+ * Fix: MAJOR issue where server could be crashed by malformed client message
+ * Fix: AuthorID is now included in padUsers API response
+ * Fix: make docs
+ * Fix: Timeslider UI bug with slider not being in position
+ * Fix: IE8 language issue where it wouldn't load pads due to IE8 suckling on the bussum of hatrid
+ * Fix: Import timeout issue
+ * Fix: Import now works if Params are set in pad URL
+ * Fix: Convert script
+ * Other: Various new language strings and update/bugfixes of others
+ * Other: Clean up the getParams functionality
+ * Other: Various new EEJS blocks: index, timeslider, html etc.
+
+# 1.2.6
+ * Fix: Package file UeberDB reference
+ * New #users EEJS block for plugins
+
+# 1.2.5
+ * Create timeslider EEJS blocks for plugins
+ * Allow for "more messages" to be loaded in chat
+ * Introduce better logging
+ * API endpoint for "listAllPads"
+ * Fix: Stop highlight of timeslider when dragging mouse
+ * Fix: Time Delta on Timeslider make date update properly
+ * Fix: Prevent empty chat messages from being sent
+ * Fix: checkPad script
+ * Fix: IE onLoad listener for i18n
+
+# 1.2.4
+ * Fix IE console issue created in 1.2.3
+ * Allow CI Tests to pass by ignoring timeslider test
+ * Fix broken placeholders in locales
+ * Fix extractPadData script
+ * Fix documentation for checkToken
+ * Fix hitting enter on form in admin/plugins
+
+# 1.2.3
+ * Fix #1307: Chrome needs console.log to be called on console obj
+ * Fix #1309: We had broken support for node v0.6 in the last release
+
+# 1.2.2
+ * More translations and better language support.  See https://translatewiki.net/wiki/Translating:Etherpad_lite for more details
+ * Add a checkToken Method to the API
+ * Bugfix for Internal Caching issue that was causing some 404s on images.
+ * Bugfix for IE Import
+ * Bugfix for Node 0.6 compatibility
+ * Bugfix for multiple cookie support
+ * Bugfix for API when requireAuth is enabled.
+ * Plugin page now shows plugin version #
+ * Show color of Author in Chat messages
+ * Allow plugin search by description
+ * Allow for different socket IO transports
+ * Allow for custom favicon path
+ * Control S now does Create new Revision functionality
+ * Focus on password when required
+ * Frontend Timeslider test
+ * Allow for basic HTML etc. import without abiword
+ * Native HTTPS support
+
+# 1.2.1
+ * Allow ! in urls inside the editor (Not Pad urls)
+ * Allow comments in language files
+ * More languages (Finish, Spanish, Bengali, Dutch) Thanks to TranslateWiki.net team.  See https://translatewiki.net/w/i.php?title=Special:MessageGroupStats&group=out-etherpad-lite for more details
+ * Bugfix for IE7/8 issue with a JS error #1186
+ * Bugfix windows package extraction issue and make the .zip file smaller
+ * Bugfix group pad API export
+ * Kristen Stewart is a terrible actress and Twilight sucks.
+
+# v1.2
+ * Internationalization / Language / Translation support (i18n) with support for German/French
+ * A frontend/client side testing framework and backend build tests
+ * Customizable robots.txt
+ * Customizable app title (finally you can name your epl instance!)
+ * eejs render arguments are now passed on to eejs hooks through the newly introduced `renderContext` argument.
+ * Plugin-specific settings in settings.json (finally allowing for things like a google analytics plugin)
+ * Serve admin dashboard at /admin (still very limited, though)
+ * Modify your settings.json through the newly created UI at /admin/settings
+ * Fix: Import `<ol>` as `<ol>` and not as `<ul>`!
+ * Added solaris compatibility (bin/installDeps.sh was broken on solaris)
+ * Fix a bug with IE9 and Password Protected Pads using HTTPS
+
+# v1.1.5
+ * We updated to express v3 (please [make sure](https://github.com/visionmedia/express/wiki/Migrating-from-2.x-to-3.x) your plugin works under express v3)
+ * `userColor` URL parameter which sets the initial author color
+ * Hooks for "padCreate", "padRemove", "padUpdate" and "padLoad" events
+ * Security patches concerning the handling of messages originating from clients
+ * Our database abstraction layer now natively supports couchDB, levelDB, mongoDB, postgres, and redis!
+ * We now provide a script helping you to migrate from dirtyDB to MySQL
+ * Support running Etherpad Lite behind IIS, using [iisnode](https://github.com/tjanczuk/iisnode/wiki)
+ * LibreJS Licensing information in headers of HTML templates
+ * Default port number to PORT env var, if port isn't specified in settings
+ * Fix for `convert.js`
+ * Raise upper char limit in chat to 999 characters
+ * Fixes for mobile layout
+ * Fixes for usage behind reverse proxy
+ * Improved documentation
+ * Fixed some opera style bugs
+ * Update npm and fix some bugs, this introduces
+
+# v1.1
+* Introduced Plugin framework
+* Many bugfixes
+* Faster page loading
+* Various UI polishes
+* Saved Revisions
+* Read only Real time view
+* More API functionality
+
+# v 1.0.1
+
+* Updated MySQL driver, this fixes some problems with mysql
+* Fixed export,import and timeslider link when embed parameters are used

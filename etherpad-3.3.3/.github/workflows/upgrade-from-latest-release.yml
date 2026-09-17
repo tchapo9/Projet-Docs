@@ -1,0 +1,103 @@
+name: "Upgrade from latest release"
+
+# any branch is useful for testing before a PR is submitted
+on:
+  push:
+    paths-ignore:
+      - "doc/**"
+  pull_request:
+    paths-ignore:
+      - "doc/**"
+
+permissions:
+  contents: read
+
+env:
+  PNPM_HOME: ~/.pnpm-store
+
+jobs:
+  withpluginsLinux:
+    # run on pushes to any branch
+    # run on PRs from external forks
+    if: |
+      (github.event_name != 'pull_request')
+      || (github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id)
+    name: Linux with Plugins
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Etherpad requires Node >= 24 (see package.json engines.node).
+        node: ${{ fromJSON('[24]') }}
+    steps:
+      -
+        name: Check out latest release
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      -
+        name: Check out latest release tag
+        run: git checkout "$(git tag --list 'v*' --sort=-version:refname | head -n1)"
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - name: Install libreoffice
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+        with:
+          packages: libreoffice libreoffice-pdfimport
+          version: 1.0
+      -
+        name: Install all dependencies and symlink for ep_etherpad-lite
+        run: pnpm install --frozen-lockfile
+      - name: Build admin ui
+        working-directory: admin
+        run: pnpm build
+      -
+        name: Install Etherpad plugins
+        run: >
+          pnpm run install-plugins
+          ep_align
+          ep_author_hover
+          ep_cursortrace
+          ep_font_size
+          ep_hash_auth
+          ep_headings2
+          ep_markdown
+          ep_guest
+          ep_set_title_on_pad
+          ep_spellcheck
+          ep_subscript_and_superscript
+          ep_table_of_contents
+      -
+        name: Run the backend tests
+        run: pnpm run test
+      -
+        name: Install all dependencies and symlink for ep_etherpad-lite
+        run: pnpm install --frozen-lockfile
+      # The job starts from the latest release tag, so fetch the pull-request
+      # ref explicitly before checking out ${GITHUB_SHA}. A plain "git fetch"
+      # only brings "normal" references (refs/heads/* and refs/tags/*), and for
+      # pull requests none of those include the synthetic merge commit.
+      -
+        name: Fetch the new Git commits
+        run: git fetch --depth=1 origin "${GITHUB_REF}"
+      -
+        name: Upgrade to the new Git revision
+        # For pull requests, ${GITHUB_SHA} is the automatically generated merge
+        # commit that merges the PR's source branch to its destination branch.
+        run: git checkout "${GITHUB_SHA}"
+      - name: Run the backend tests
+        run: pnpm run test

@@ -1,0 +1,96 @@
+# Workflow for building and deploying the VitePress site to GitHub Pages.
+# Build runs on every push to develop and on every PR that touches docs (so
+# a build regression is caught at review time instead of breaking develop
+# after merge — see #7640). Deploy runs only on push: the github-pages
+# environment has protection rules that reject PR refs, and a PR build
+# never produced an artifact to deploy anyway.
+name: Deploy Docs to GitHub Pages
+
+on:
+  push:
+    branches: ["develop"]
+    paths:
+      - doc/**
+      - .github/workflows/build-and-deploy-docs.yml
+  pull_request:
+    paths:
+      - doc/**
+      - .github/workflows/build-and-deploy-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  packages: read
+
+# Allow only one concurrent deployment, skipping runs queued between the run
+# in-progress and latest queued. Do NOT cancel in-progress runs — production
+# deployments are allowed to complete.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: actions/cache@v6
+        name: Cache vitepress build
+        with:
+          path: doc/.vitepress/cache
+          key: ${{ runner.os }}-vitepress-${{ hashFiles('doc/**/*.md', 'doc/.vitepress/config.*') }}
+          restore-keys: |
+            ${{ runner.os }}-vitepress-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+      # Pin Node so the build does not silently fall back to whatever the
+      # runner image ships with. The repo declares engines.node >=24.0.0.
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Setup Pages
+        if: github.event_name == 'push'
+        uses: actions/configure-pages@v6
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build app
+        working-directory: doc
+        run: pnpm run docs:build
+        env:
+          GITHUB_PAGES: ${{ github.event_name == 'push' && 'true' || '' }}
+          COMMIT_REF: ${{ github.sha }}
+      - name: Upload artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: './doc/.vitepress/dist'
+
+  # Deploy to GitHub Pages on push to develop only. Kept as a separate job
+  # because the github-pages environment's protection rules reject any
+  # non-develop ref (including PR merge refs), which used to fail the entire
+  # workflow at job-creation time before any build step could run.
+  deploy:
+    needs: build
+    if: github.event_name == 'push'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

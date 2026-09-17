@@ -1,0 +1,52 @@
+/* =========================================================
+ * Lumen Docs — Thème indigo pour la page d'accueil Etherpad
+ *
+ * Chargé via @import dans src/static/skins/colibris/index.css
+ * (même mécanisme que pad.css -> custom/etherpad.css).
+ * Surpasse les variables "vertes" par défaut du skin colibris
+ * pour aligner la page d'accueil sur l'identité Lumen (indigo).
+ * ========================================================= */
+
+:root {
+  --ep-color: #4f46e5;
+  --etherpad-color: #4f46e5;
+  --etherpad-color-dark: #3730a3;
+  --muted-text: #4b5563;
+}
+
+/* Logo (carré) : passe du vert au indigo */
+.logo-box {
+  background: #4f46e5;
+}
+
+/* Boutons d'action principaux : indigo */
+#go2Name [type="submit"]:hover,
+#transferSessionButton {
+  background-color: #4f46e5;
+}
+
+#go2Name [type="submit"],
+#transferSessionButton {
+  background-color: #4f46e5;
+  border-color: #4f46e5;
+}
+
+#transferSessionButton:hover:not(:disabled) {
+  background-color: #4338ca;
+}
+
+/* Liens "recent pad" au survol : indigo */
+.recent-pad:hover a {
+  color: #4f46e5;
+}
+
+/* Fond de la page : fondu de couleurs indigo/violet */
+.body {
+  background: linear-gradient(
+    to bottom right,
+    #e0e7ff, /* indigo-100 */
+    #eef2ff, /* indigo-50 */
+    #ede9fe, /* violet-50 */
+    #c7d2fe  /* indigo-200 */
+  );
+}

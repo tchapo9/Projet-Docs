@@ -1,0 +1,375 @@
+# Etherpad — the editor for documents that matter
+
+> Real-time collaborative editing where authorship is the default, your server is the only server, and you decide what AI (if any) ever touches your text.
+
+![Demo Etherpad Animated Jif](doc/public/etherpad_demo.gif "Etherpad in action")
+
+## About
+
+**Etherpad is a real-time collaborative editor for documents that matter.**
+
+Every keystroke is attributed to its author. Every revision is preserved. The timeslider lets you scrub through a document's entire history, character by character. Author colours make collaboration visible at a glance — not buried in a menu.
+
+Etherpad runs on your server, under your governance. No telemetry. No upsells. AI is a plugin you install, pointed at the model you choose, running on infrastructure you control — not a feature decided for you in a boardroom you weren't in. See [PRIVACY.md](PRIVACY.md) for the two opt-out network calls Etherpad's own code makes and how to disable each.
+
+The code is Apache 2.0. The data format is open. It [scales to thousands of simultaneous editors per pad](http://scale.etherpad.org/). Translated into 105 languages. Extended through hundreds of plugins. Used by Wikimedia, governments, public-sector institutions, and self-hosters worldwide since 2009.
+
+[Full data export](https://github.com/ether/etherpad/wiki/Understanding-Etherpad's-Full-Data-Export-capabilities) is built in. The history is yours.
+
+## Try it out
+
+[Try out a public Etherpad instance](https://scanner.etherpad.org)
+
+## Project Status
+
+Etherpad has been doing the same thing — well — since 2009. No pivots, no acquisitions, no enshittification. Maintained by a small volunteer team.
+
+**We are actively looking for maintainers.** If you have experience with Node.js, real-time systems, or institutional collaboration tooling and you want to work on infrastructure that thousands of organisations quietly depend on, please [open an issue](https://github.com/ether/etherpad/issues) or contact [John McLear](https://github.com/JohnMcLear).
+
+### Code Quality
+
+[![Code Quality](https://github.com/ether/etherpad/actions/workflows/codeql-analysis.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/codeql-analysis.yml)
+
+### Testing
+
+[![Backend tests](https://github.com/ether/etherpad/actions/workflows/backend-tests.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/backend-tests.yml)
+[![Simulated Load](https://github.com/ether/etherpad/actions/workflows/load-test.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/load-test.yml)
+[![Rate Limit](https://github.com/ether/etherpad/actions/workflows/rate-limit.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/rate-limit.yml)
+[![Docker file](https://github.com/ether/etherpad/actions/workflows/docker.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/docker.yml)
+[![Frontend admin tests](https://github.com/ether/etherpad/actions/workflows/frontend-admin-tests.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/frontend-admin-tests.yml)
+[![Frontend tests](https://github.com/ether/etherpad/actions/workflows/frontend-tests.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad/actions/workflows/frontend-tests.yml)
+
+### Engagement
+
+[![Docker Pulls](https://img.shields.io/docker/pulls/etherpad/etherpad?color=%2344b492)](https://hub.docker.com/r/etherpad/etherpad)
+[![Discord](https://img.shields.io/discord/741309013593030667?color=%2344b492)](https://discord.com/invite/daEjfhw)
+[![Etherpad plugins](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatic.etherpad.org%2Fshields.json&color=%2344b492 "Etherpad plugins")](https://etherpad.org/plugins)
+![Languages](https://img.shields.io/static/v1?label=Languages&message=105&color=%2344b492)
+![Translation Coverage](https://img.shields.io/static/v1?label=Languages&message=98%&color=%2344b492)
+
+## Who uses Etherpad
+
+For more than a decade, Etherpad has quietly underpinned the documents that matter to:
+
+- **Wikimedia Foundation** — collaborative drafting across editor communities.
+- **Public-sector institutions across the EU** — including organisations that legally cannot use US-cloud SaaS for sovereignty and GDPR reasons.
+- **Universities and schools worldwide** — including jurisdictions where Google Workspace is no longer permitted in education.
+- **Civic-tech and democratic-deliberation projects** — citizen assemblies, participatory budgeting, public consultations.
+- **Newsrooms and investigative journalism teams** — where authorship and editing history matter for legal and editorial integrity.
+- **Tens of thousands of self-hosted instances** worldwide, run by IT teams who chose Etherpad because it is theirs.
+
+[Public Etherpad Instances for you to try out.  Third party instances not provided by the Etherpad foundation](https://scanner.etherpad.org/).
+
+## Installation
+
+### Quick install (one-liner)
+
+The fastest way to get Etherpad running. Requires `git` and Node.js >= 24.
+
+**macOS / Linux / WSL:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ether/etherpad/master/bin/installer.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/ether/etherpad/master/bin/installer.ps1 | iex
+```
+
+Both installers clone Etherpad into `./etherpad-lite`, install dependencies, and
+build the frontend. When the installer finishes, run:
+
+```sh
+cd etherpad-lite && pnpm run prod
+```
+
+Then open <http://localhost:9001>.
+
+To install and start in one go:
+
+```sh
+# macOS / Linux / WSL
+ETHERPAD_RUN=1 sh -c "$(curl -fsSL https://raw.githubusercontent.com/ether/etherpad/master/bin/installer.sh)"
+```
+
+```powershell
+# Windows
+$env:ETHERPAD_RUN=1; irm https://raw.githubusercontent.com/ether/etherpad/master/bin/installer.ps1 | iex
+```
+
+### Docker-Compose
+
+The official image is published to both Docker Hub (`etherpad/etherpad`) and GitHub Container Registry (`ghcr.io/ether/etherpad`) with identical tags. Use whichever suits your environment; GHCR avoids Docker Hub's anonymous pull rate limits.
+
+```yaml
+services:
+  app:
+    user: "0:0"
+    image: etherpad/etherpad:latest  # or: ghcr.io/ether/etherpad:latest
+    tty: true
+    stdin_open: true
+    volumes:
+      - plugins:/opt/etherpad-lite/src/plugin_packages
+      - etherpad-var:/opt/etherpad-lite/var
+    depends_on:
+      - postgres
+    environment:
+      NODE_ENV: production
+      ADMIN_PASSWORD: "${DOCKER_COMPOSE_APP_ADMIN_PASSWORD:?Set DOCKER_COMPOSE_APP_ADMIN_PASSWORD to a strong value}"
+      DB_CHARSET: ${DOCKER_COMPOSE_APP_DB_CHARSET:-utf8mb4}
+      DB_HOST: postgres
+      DB_NAME: ${DOCKER_COMPOSE_POSTGRES_DATABASE:-etherpad}
+      DB_PASS: "${DOCKER_COMPOSE_POSTGRES_PASSWORD:?Set DOCKER_COMPOSE_POSTGRES_PASSWORD to a strong value}"
+      DB_PORT: ${DOCKER_COMPOSE_POSTGRES_PORT:-5432}
+      DB_TYPE: "postgres"
+      DB_USER: ${DOCKER_COMPOSE_POSTGRES_USER:-admin}
+      # For now, the env var DEFAULT_PAD_TEXT cannot be unset or empty; it seems to be mandatory in the latest version of etherpad
+      DEFAULT_PAD_TEXT: ${DOCKER_COMPOSE_APP_DEFAULT_PAD_TEXT:- }
+      DISABLE_IP_LOGGING: ${DOCKER_COMPOSE_APP_DISABLE_IP_LOGGING:-false}
+      SOFFICE: ${DOCKER_COMPOSE_APP_SOFFICE:-null}
+      TRUST_PROXY: ${DOCKER_COMPOSE_APP_TRUST_PROXY:-false}
+    restart: always
+    ports:
+      - "${DOCKER_COMPOSE_APP_PORT_PUBLISHED:-9001}:${DOCKER_COMPOSE_APP_PORT_TARGET:-9001}"
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${DOCKER_COMPOSE_POSTGRES_DATABASE:-etherpad}
+      POSTGRES_PASSWORD: "${DOCKER_COMPOSE_POSTGRES_PASSWORD:?Set DOCKER_COMPOSE_POSTGRES_PASSWORD to a strong value}"
+      POSTGRES_PORT: ${DOCKER_COMPOSE_POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${DOCKER_COMPOSE_POSTGRES_USER:-admin}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    restart: always
+    # Exposing the port is not needed unless you want to access this database instance from the host.
+    # Be careful when other postgres docker container are running on the same port
+    # ports:
+    #   - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+  plugins:
+  etherpad-var:
+```
+
+### Requirements
+
+[Node.js](https://nodejs.org/) >= 24.
+
+### Windows, macOS, Linux
+
+1. Download the latest Node.js runtime from [nodejs.org](https://nodejs.org/).
+2. Install pnpm: `npm install -g pnpm` (Administrator privileges may be required).
+3. Clone the repository: `git clone -b master`
+4. Run `pnpm i`
+5. Run `pnpm run build:etherpad`
+6. Run `pnpm run prod`
+7. Visit `http://localhost:9001` in your browser.
+
+### Docker container
+
+Find [here](doc/docker.md) information on running Etherpad in a container.
+
+## Plugins
+
+Etherpad is very customizable through plugins.
+
+![Basic install](doc/public/etherpad_basic.png "Basic Installation")
+
+![Full Features](doc/public/etherpad_full_features.png "You can add a lot of plugins !")
+
+### Available Plugins
+
+For a list of available plugins, see the [plugins
+site](https://static.etherpad.org).
+
+### Plugin Installation
+
+You can install plugins from the admin web interface (e.g.,
+http://127.0.0.1:9001/admin/plugins).
+
+Alternatively, you can install plugins from the command line:
+
+```sh
+cd /path/to/etherpad-lite
+pnpm run plugins i ep_${plugin_name}
+```
+
+Also see [the plugin wiki
+article](https://github.com/ether/etherpad/wiki/Available-Plugins).
+
+### Suggested Plugins
+
+Run the following command in your Etherpad folder to get all of the features
+visible in the above demo gif:
+
+```sh
+pnpm run plugins i \
+  ep_align \
+  ep_comments_page \
+  ep_embedded_hyperlinks2 \
+  ep_font_color \
+  ep_headings2 \
+  ep_markdown \
+  ep_webrtc
+```
+
+For user authentication, you are encouraged to run an [OpenID
+Connect](https://openid.net/connect/) identity provider (OP) and install the
+following plugins:
+
+  * [ep_openid_connect](https://github.com/ether/ep_openid_connect#readme) to
+    authenticate against your OP.
+  * [ep_guest](https://github.com/ether/ep_guest#readme) to create a
+    "guest" account that has limited access (e.g., read-only access).
+  * [ep_user_displayname](https://github.com/ether/ep_user_displayname#readme)
+    to automatically populate each user's displayed name from your OP.
+  * [ep_stable_authorid](https://github.com/ether/ep_stable_authorid#readme) so
+    that each user's chosen color, display name, comment ownership, etc. is
+    strongly linked to their account.
+
+### Upgrade Etherpad
+
+Run the following command in your Etherpad folder to upgrade
+
+1. Stop any running Etherpad (manual, systemd ...)
+2. Get present version
+```sh
+git -P tag --contains
+```
+3. List versions available
+```sh
+git -P tag --list "v*" --merged
+```
+4. Select the version
+```sh
+git checkout v3.2.0
+git switch -c v3.2.0
+```
+5. Upgrade Etherpad
+```sh
+./bin/run.sh
+```
+6. Stop with [CTRL-C]
+7. Restart your Etherpad service
+
+## Next Steps
+
+### Tweak the settings
+
+You can modify the settings in `settings.json`. If you need to handle multiple
+settings files, you can pass the path to a settings file to `bin/run.sh`
+using the `-s|--settings` option: this allows you to run multiple Etherpad
+instances from the same installation. Similarly, `--credentials` can be used to
+give a settings override file, `--apikey` to give a different APIKEY.txt file
+and `--sessionkey` to give a non-default `SESSIONKEY.txt`. **Each configuration
+parameter can also be set via an environment variable**, using the syntax
+`"${ENV_VAR}"` or `"${ENV_VAR:default_value}"`. For details, refer to
+`settings.json.template`. Once you have access to your `/admin` section,
+settings can be modified through the web browser.
+
+If you are planning to use Etherpad in a production environment, you should use
+a dedicated database such as `mysql`, since the `dirtyDB` database driver is
+only for testing and/or development purposes.
+
+### Secure your installation
+
+If you have enabled authentication in `users` section in `settings.json`, it is
+a good security practice to **store hashes instead of plain text passwords** in
+that file. This is _especially_ advised if you are running a production
+installation.
+
+Please install [ep_hash_auth plugin](https://www.npmjs.com/package/ep_hash_auth)
+and configure it. If you prefer, `ep_hash_auth` also gives you the option of
+storing the users in a custom directory in the file system, without having to
+edit `settings.json` and restart Etherpad each time.
+
+### Customize the style with skin variants
+
+Open http://127.0.0.1:9001/p/test#skinvariantsbuilder in your browser and start
+playing!
+
+![Skin Variant](doc/public/etherpad_skin_variants.gif "Skin variants")
+
+## Helpful resources
+
+The [wiki](https://github.com/ether/etherpad/wiki) is your one-stop
+resource for Tutorials and How-to's.
+
+Documentation can be found in `doc/`.
+
+## Development
+
+### Things you should know
+
+You can debug Etherpad using `bin/debugRun.sh`.
+
+You can run Etherpad quickly launching `bin/fastRun.sh`. It's convenient for
+developers and advanced users. Be aware that it will skip the dependencies
+update, so remember to run `bin/installDeps.sh` after installing a new
+dependency or upgrading version.
+
+If you want to find out how Etherpad's `Easysync` works (the library that makes
+it really realtime), start with this
+[PDF](https://github.com/ether/etherpad/raw/master/doc/easysync/easysync-full-description.pdf)
+(complex, but worth reading).
+
+### Contributing
+
+Read our [**Developer
+Guidelines**](https://github.com/ether/etherpad/blob/master/CONTRIBUTING.md)
+
+### HTTP API
+
+Etherpad is designed to be easily embeddable and provides a [HTTP
+API](https://github.com/ether/etherpad/wiki/HTTP-API) that allows your web
+application to manage pads, users and groups. It is recommended to use the
+[available client
+implementations](https://github.com/ether/etherpad/wiki/HTTP-API-client-libraries)
+in order to interact with this API.
+
+OpenAPI (previously swagger) definitions for the API are exposed under
+`/api/openapi.json`.
+
+### jQuery plugin
+
+There is a [jQuery plugin](https://github.com/ether/etherpad-lite-jquery-plugin)
+that helps you to embed Pads into your website.
+
+### Plugin Framework
+
+Etherpad offers a plugin framework, allowing you to easily add your own
+features. By default your Etherpad is extremely light-weight and it's up to you
+to customize your experience. Once you have Etherpad installed you should [visit
+the plugin page](https://static.etherpad.org/) and take control.
+
+### Translations / Localizations  (i18n / l10n)
+
+Etherpad comes with translations into all languages thanks to the team at
+[TranslateWiki](https://translatewiki.net/).
+
+If you require translations in [plugins](https://static.etherpad.org/) please
+send pull request to each plugin individually.
+
+## FAQ
+
+Visit the **[FAQ](https://github.com/ether/etherpad/wiki/FAQ)**.
+
+## Get in touch
+
+The official channel for contacting the development team is via the [GitHub
+issues](https://github.com/ether/etherpad/issues).
+
+For **responsible disclosure of vulnerabilities**, please write a mail to the
+maintainers (a.mux@inwind.it and contact@etherpad.org).
+
+Join the official [Etherpad Discord
+Channel](https://discord.com/invite/daEjfhw).
+
+## License
+
+[Apache License v2](http://www.apache.org/licenses/LICENSE-2.0.html)

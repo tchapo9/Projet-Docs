@@ -1,0 +1,54 @@
+/* Lumen Docs — Couleurs Etherpad */
+#outer {
+  background-color: #f8f9fa !important;
+}
+
+#pad {
+  background-color: #ffffff !important;
+  border: 1px solid #e5e7eb !important;
+  border-radius: 8px !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
+}
+
+#editbar {
+  background-color: #ffffff !important;
+  border-bottom: 1px solid #e5e7eb !important;
+}
+
+#editbar .buttonicon {
+  color: #4f46e5 !important;
+}
+
+#editbar .buttonicon:hover {
+  background-color: #eef2ff !important;
+  color: #4338ca !important;
+}
+
+.toolbar {
+  background-color: #ffffff !important;
+}
+
+.toolbar button {
+  color: #374151 !important;
+}
+
+.toolbar button:hover {
+  background-color: #eef2ff !important;
+  color: #4f46e5 !important;
+}
+
+#chattext {
+  border-color: #e5e7eb !important;
+}
+
+#chaticon {
+  color: #4f46e5 !important;
+}
+
+.padlink {
+  color: #4f46e5 !important;
+}
+
+#otherusers {
+  background-color: #ffffff !important;
+}

@@ -1,0 +1,63 @@
+name: "Handle release"
+
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # allow manual triggering of the workflow
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PNPM_HOME: ~/.pnpm-store
+
+jobs:
+  create-release:
+    permissions: write-all
+    # run on pushes to any branch
+    # run on PRs from external forks
+    if: |
+      (github.event_name != 'pull_request')
+      || (github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id)
+    name: Handle the release
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout repository
+        uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install all dependencies and symlink for ep_etherpad-lite
+        run: pnpm install --frozen-lockfile
+      - name: Build etherpad
+        run: pnpm run build:etherpad
+      # On release, create release. `--silent` suppresses pnpm's lifecycle
+      # banner ("> generateChangelog\n> node ...") that would otherwise be
+      # captured into CHANGELOG.txt and end up at the top of the GitHub
+      # release notes.
+      - name: Generate Changelog
+        working-directory: bin
+        run: pnpm --silent run generateChangelog ${{ github.ref }} > ${{ github.workspace }}-CHANGELOG.txt
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        if: ${{startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          body_path: ${{ github.workspace }}-CHANGELOG.txt
+          make_latest: true

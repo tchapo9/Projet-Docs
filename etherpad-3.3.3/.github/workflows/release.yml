@@ -1,0 +1,97 @@
+permissions:
+  contents: read
+name: Release etherpad
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Choose the type of release to create'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+env:
+  PNPM_HOME: ~/.pnpm-store
+
+jobs:
+  releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+            repository: ether/etherpad-lite
+            path: etherpad
+            token: '${{ secrets.ETHER_RELEASE_TOKEN }}'
+            fetch-depth: '0'
+            fetch-tags: 'true'
+      - name: Checkout master
+        working-directory: etherpad
+        run: |
+          git fetch origin master
+          git checkout master
+          git reset --hard origin/master
+      - name: Checkout develop
+        working-directory: etherpad
+        run: |
+          git fetch origin develop
+          git checkout develop
+          git reset --hard origin/develop
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          repository: ether/ether.github.com
+          path: ether.github.com
+          token: '${{ secrets.ETHER_RELEASE_TOKEN }}'
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+          # Repo is checked out into ./etherpad, so the action can't find
+          # packageManager in a root package.json.
+          package_json_file: etherpad/package.json
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: etherpad/pnpm-lock.yaml
+      - name: Install dependencies ether.github.com
+        # ether.github.com depends on sharp (Next.js image pipeline), whose
+        # install script must run to fetch the platform binary. pnpm 11
+        # turned ignored-builds into an error; allow all builds for this
+        # external repo since we don't control its pnpm-workspace.yaml.
+        run: pnpm install --frozen-lockfile --config.dangerously-allow-all-builds=true
+        working-directory: ether.github.com
+      - name: Set git user
+        run: |
+          git config --global user.name "Etherpad Release Bot"
+          git config --global user.email "noreply@etherpad.org"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 2.7
+
+      - uses: reitzig/actions-asciidoctor@v2.0.5
+        with:
+          version: 2.0.18
+      - name: Prepare release
+        working-directory: etherpad
+        run: |
+          cd bin
+          pnpm install
+          pnpm run release ${{ inputs.release_type }}
+      - name: Push after release
+        working-directory: etherpad
+        run: |
+          ./bin/push-after-release.sh

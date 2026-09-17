@@ -1,0 +1,437 @@
+name: "Docker"
+on:
+  pull_request:
+    paths-ignore:
+      - 'doc/**'
+  push:
+    branches:
+      - 'develop'
+    paths-ignore:
+      - 'doc/**'
+    tags:
+      - 'v?[0-9]+.[0-9]+.[0-9]+'
+env:
+  TEST_TAG: etherpad/etherpad:test
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PNPM_HOME: ~/.pnpm-store
+    steps:
+      -
+        name: Check out
+        uses: actions/checkout@v7
+        with:
+          path: etherpad
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Build and export to Docker
+        uses: docker/build-push-action@v7
+        with:
+          context: ./etherpad
+          target: production
+          load: true
+          tags: ${{ env.TEST_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/cache@v6
+        name: Cache pnpm store
+        with:
+          path: ${{ env.PNPM_HOME }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+          # Repo is checked out into ./etherpad, so the action can't find
+          # packageManager in a root package.json.
+          package_json_file: etherpad/package.json
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: etherpad/pnpm-lock.yaml
+      -
+        name: Test
+        working-directory: etherpad
+        run: |
+          # ADMIN_PASSWORD provisions settings.json.docker's admin user so
+          # the adminSettings_7819 container spec can authenticate against
+          # /admin and the /settings socket. pad.js doesn't touch /admin
+          # so the existing API specs are unaffected.
+          docker run --rm -d -p 9001:9001 \
+            -e ADMIN_PASSWORD=changeme1 \
+            --name test ${{ env.TEST_TAG }}
+          ./bin/installDeps.sh
+          docker logs -f test &
+          while true; do
+            echo "Waiting for Docker container to start..."
+            status=$(docker container inspect -f '{{.State.Health.Status}}' test) || exit 1
+            case ${status} in
+              healthy) break;;
+              starting) sleep 2;;
+              *) printf %s\\n "unexpected status: ${status}" >&2; exit 1;;
+            esac
+          done
+          (cd src && pnpm run test-container)
+          # Regression for #7819. adminSettings_7819.ts saves a marker via
+          # the admin /settings socket and intentionally leaves it on
+          # disk. We assert here that the save actually hit the file
+          # (mocha only sees the next `load` reply — this catches a
+          # scenario where the load is served from cache and the file
+          # never actually changed).
+          docker exec test grep -q persist-marker-7819 /opt/etherpad-lite/settings.json || {
+            echo "[#7819] socket-driven save did NOT reach /opt/etherpad-lite/settings.json on disk"
+            docker exec test cat /opt/etherpad-lite/settings.json | head -50
+            exit 1
+          }
+          # Now prove the on-disk file survives an in-place container
+          # restart. This is the scenario a docker-compose user with
+          # `restart: always` hits on every host reboot.
+          docker restart test >/dev/null
+          for i in $(seq 1 60); do
+            status=$(docker container inspect -f '{{.State.Health.Status}}' test 2>/dev/null) || { docker logs test; exit 1; }
+            case ${status} in
+              healthy) break;;
+              starting) sleep 2;;
+              *) docker logs test; exit 1;;
+            esac
+          done
+          docker exec test grep -q persist-marker-7819 /opt/etherpad-lite/settings.json || {
+            echo "[#7819 REGRESSION] settings.json was reset on docker restart — ep_oauth block vanished"
+            docker logs test
+            exit 1
+          }
+          docker rm -f test
+          git clean -dxf .
+      -
+        # Regression test for #7718. Reproduces the production
+        # docker-compose layout reported in that issue: a named volume
+        # mounted on src/plugin_packages with no TTY allocated. Under
+        # the previous `CMD ["pnpm", "run", "prod"]`, pnpm 11's
+        # runDepsStatusCheck spuriously decided node_modules was out of
+        # sync at boot and tried to wipe + reinstall, aborting with
+        # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY before the HTTP
+        # server ever came up. If the CMD is ever reverted to go
+        # through `pnpm run`, this step will time out waiting for the
+        # health endpoint and fail.
+        name: Regression — boot with named volume on plugin_packages (#7718)
+        working-directory: etherpad
+        run: |
+          docker volume create ep7718-plugins
+          docker run --rm -d -p 9001:9001 \
+            -v ep7718-plugins:/opt/etherpad-lite/src/plugin_packages \
+            --name test-7718 ${{ env.TEST_TAG }}
+          docker logs -f test-7718 &
+          ok=0
+          for i in $(seq 1 60); do
+            status=$(docker container inspect -f '{{.State.Health.Status}}' test-7718 2>/dev/null) || {
+              echo "container exited prematurely — likely #7718 regression"
+              docker logs test-7718 || true
+              break
+            }
+            case ${status} in
+              healthy) ok=1; echo "container healthy after $((i*2))s"; break;;
+              starting) sleep 2;;
+              *) echo "unexpected status: ${status}"; docker logs test-7718; break;;
+            esac
+          done
+          docker rm -f test-7718 >/dev/null 2>&1 || true
+          docker volume rm ep7718-plugins >/dev/null 2>&1 || true
+          [ "$ok" = "1" ] || exit 1
+
+      -
+        # Regression test: Etherpad container must boot without external
+        # network access (e.g., air-gapped host or restrictive runtime policy).
+        name: Regression — boot with disabled network (--network none)
+        working-directory: etherpad
+        run: |
+          docker run --rm -d \
+            --network none \
+            --name test-offline ${{ env.TEST_TAG }}
+          docker logs -f test-offline &
+          ok=0
+          for i in $(seq 1 60); do
+            status=$(docker container inspect -f '{{.State.Health.Status}}' test-offline 2>/dev/null) || {
+              echo "container exited prematurely while offline"
+              docker logs test-offline || true
+              break
+            }
+            case ${status} in
+              healthy) ok=1; echo "offline boot healthy after $((i*2))s"; break;;
+              starting) sleep 2;;
+              *) echo "unexpected status: ${status}"; docker logs test-offline || true; break;;
+            esac
+          done
+          docker rm -f test-offline >/dev/null 2>&1 || true
+          [ "$ok" = "1" ] || exit 1
+
+  build-test-local-plugin:
+    # Regression coverage for #7687: the Docker image's
+    # `bin/installLocalPlugins.sh` step runs as the `etherpad` user and
+    # invokes pnpm via the corepack shim. A previous corepack/cache bug
+    # made that path fail when ETHERPAD_LOCAL_PLUGINS was set. This job
+    # builds the development target with a stub local plugin so the
+    # regression cannot silently come back.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      -
+        name: Check out
+        uses: actions/checkout@v7
+        with:
+          path: etherpad
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Stub a local plugin
+        run: |
+          mkdir -p etherpad/local_plugins/ep_test_corepack
+          cat > etherpad/local_plugins/ep_test_corepack/package.json <<'EOF'
+          {
+            "name": "ep_test_corepack",
+            "version": "0.0.1",
+            "description": "regression-test stub for ether/etherpad#7687",
+            "main": "index.js"
+          }
+          EOF
+          cat > etherpad/local_plugins/ep_test_corepack/index.js <<'EOF'
+          exports.placeholder = true;
+          EOF
+      -
+        name: Build with ETHERPAD_LOCAL_PLUGINS (must succeed)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./etherpad
+          target: development
+          load: false
+          build-args: |
+            ETHERPAD_LOCAL_PLUGINS=ep_test_corepack
+          cache-from: type=gha
+
+  build-test-db-drivers:
+    # Spinning up MySQL + Postgres + cross-driver smoke is expensive; only
+    # run it on pushes to develop (and tagged release pushes), not on every
+    # feature-branch PR.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: etherpad
+          MYSQL_USER: etherpad
+          MYSQL_PASSWORD: password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ppassword"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: etherpad
+          POSTGRES_USER: etherpad
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U etherpad -d etherpad"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      -
+        name: Check out
+        uses: actions/checkout@v7
+        with:
+          path: etherpad
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./etherpad
+          target: production
+          load: true
+          tags: ${{ env.TEST_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      -
+        name: Driver presence test (all 10 ueberdb2 drivers must resolve)
+        run: |
+          docker run --rm -w /opt/etherpad-lite/src "$TEST_TAG" node -e "
+            const mods = [
+              '@elastic/elasticsearch','cassandra-driver','mongodb','mssql',
+              'mysql2','nano','pg','redis','rethinkdb','surrealdb'
+            ];
+            let fail = false;
+            for (const m of mods) {
+              try { require(m); console.log('ok', m); }
+              catch (e) { console.error('MISSING', m, e.message); fail = true; }
+            }
+            if (fail) process.exit(1);
+          "
+      -
+        name: MySQL smoke — start Etherpad against mysql service
+        run: |
+          docker run --rm -d \
+            --network host \
+            -e NODE_ENV=production \
+            -e ADMIN_PASSWORD=admin \
+            -e DB_TYPE=mysql \
+            -e DB_HOST=127.0.0.1 \
+            -e DB_PORT=3306 \
+            -e DB_NAME=etherpad \
+            -e DB_USER=etherpad \
+            -e DB_PASS=password \
+            -e DB_CHARSET=utf8mb4 \
+            -e DEFAULT_PAD_TEXT="Test " \
+            --name et-mysql "$TEST_TAG"
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9001/ >/dev/null; then
+              echo "mysql smoke: Etherpad is serving /"
+              docker rm -f et-mysql
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "mysql smoke: timed out waiting for Etherpad"
+          docker logs et-mysql || true
+          docker rm -f et-mysql || true
+          exit 1
+      -
+        name: Postgres smoke — start Etherpad against postgres service
+        run: |
+          docker run --rm -d \
+            --network host \
+            -e NODE_ENV=production \
+            -e ADMIN_PASSWORD=admin \
+            -e DB_TYPE=postgres \
+            -e DB_HOST=127.0.0.1 \
+            -e DB_PORT=5432 \
+            -e DB_NAME=etherpad \
+            -e DB_USER=etherpad \
+            -e DB_PASS=password \
+            -e DEFAULT_PAD_TEXT="Test " \
+            --name et-postgres "$TEST_TAG"
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9001/ >/dev/null; then
+              echo "postgres smoke: Etherpad is serving /"
+              docker rm -f et-postgres
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres smoke: timed out waiting for Etherpad"
+          docker logs et-postgres || true
+          docker rm -f et-postgres || true
+          exit 1
+
+  publish:
+    needs: [build-test, build-test-db-drivers]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      -
+        name: Check out
+        uses: actions/checkout@v7
+        with:
+          path: etherpad
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            etherpad/etherpad
+            ghcr.io/ether/etherpad
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+      -
+        name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      -
+        name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Build and push
+        id: build-docker
+        uses: docker/build-push-action@v7
+        with:
+          context: ./etherpad
+          target: production
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+      - name: Update repo description
+        uses: peter-evans/dockerhub-description@v5
+        if: github.ref == 'refs/heads/master'
+        with:
+          readme-filepath: ./etherpad/README.md
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: etherpad/etherpad
+          enable-url-completion: true
+      - name: Check out ether-charts
+        if: github.ref == 'refs/heads/develop'
+        uses: actions/checkout@v7
+        with:
+          path: ether-charts
+          repository: ether/ether-charts
+          token: ${{ secrets.ETHER_CHART_TOKEN }}
+      - name: Update tag in values-dev.yaml
+        if: success() && github.ref == 'refs/heads/develop'
+        working-directory: ether-charts
+        run: |
+          sed -i 's/tag: ".*"/tag: "${{ steps.build-docker.outputs.digest }}"/' charts/etherpad/values-dev.yaml
+      - name: Commit and push changes
+        working-directory: ether-charts
+        if: success() && github.ref == 'refs/heads/develop'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add charts/etherpad/values-dev.yaml
+          git commit -m 'Update develop image tag'
+          git push
